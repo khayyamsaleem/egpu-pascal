@@ -1,0 +1,16 @@
+nvmlCountMayDisagreeWithCUDA
+nvmlDeviceForCudaDevice
+nvmlDeviceGetComputeRunningProcesses_v3
+nvmlDeviceGetCount_v2
+nvmlDeviceGetCudaComputeCapability
+nvmlDeviceGetCurrentClocksThrottleReasons
+nvmlDeviceGetHandleByIndex
+nvmlDeviceGetMemoryInfo
+nvmlDeviceGetMigMode
+nvmlDeviceGetName
+nvmlDeviceGetPciInfo_v3
+nvmlDeviceGetTotalEccErrors
+nvmlErrorString
+nvmlInit_v2
+nvmlShutdown
+nvmlSystemGetDriverVersion

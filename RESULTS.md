@@ -172,3 +172,40 @@ Sources: [forum: older NVIDIA GPUs](https://forum.modular.com/t/support-for-olde
 * Kernels: `kernels/build.sh` (Docker image `egpu-ptxas:12.4`, ptxas
   `-arch=sm_61`). Inspect with `pascal/cubin.py` and `envydis -m gm107`.
 * Offline test: `pascal/mmu.py --selftest`.
+
+## 9. Phase 6 progress (rung 5): MAX on the card
+
+**A kernel compiled by Mojo/MAX ran on the GTX 1080 Ti** (2026-11-08):
+`shim/tests/vadd.mojo` → MAX's compiler (`mojo build --target-accelerator=nvidia:61`,
+Mojo 1.1.0 / MAX 26.6.0, Linux-aarch64 container) → **`.target sm_61` PTX**
+(`kernels/captured/mojo_vadd.ptx`) → CUDA 12.4 `ptxas` → `nvpascal` launch:
+**4096/4096 correct floats, 34 µs** (`shim/tests/run_mojo_ptx.py`). For now the
+bridge from the PTX to the launch is manual; stage 2 of the shim automates it.
+
+What the discovery shim (`shim/`, stage 1) established:
+
+* MAX `dlopen`s `libcuda.so.1` + `libnvidia-ml.so.1` and `dlsym`s **118 `cu*` + 16
+  `nvml*` names** directly (no `cuGetProcAddress`). The shim exports all of them: 67
+  implemented, 51 logging stubs (graphs, multicast, VMM, tensor maps, peer).
+* With a GP102 presented as CC 6.1 / driver 580, `DeviceContext()` comes up as
+  "NVIDIA GeForce GTX 1080 Ti". **Mojo 1.1's architecture table already lists
+  sm_60/sm_61**, so no target patch is needed (`--target-accelerator=nvidia:61` at
+  build time when no GPU is visible).
+* MAX hands the driver **PTX** (`cuModuleLoadDataEx`), not a cubin, so the shim's
+  server JITs it with our `ptxas`. Launches go through **`cuLaunchKernelEx`**.
+* At startup MAX pre-allocates a pool of about 90% of reported free VRAM
+  (`cuMemAlloc(9.9 GB)`) plus 1.28 GB of pinned host memory, and sub-allocates from
+  them. So the real shim needs a large VA mapping (2 MB pages) and honest `cuMemGetInfo`.
+* Parameter layout for packing `kernelParams` comes from the cubin's `KPARAM_INFO`
+  (ordinal, offset, size = (w >> 18) & 0x3fff).
+
+Read-only reclock findings (`pascal/vbios_perf.py`): VBIOS perf table 5.0 gives
+memory **P8 405 / P5 810 / P2 5005 / P0 5505 MHz**, and P8's gpc2clk of 1215 MHz
+matches the measured 607 MHz SM clock. So devinit leaves the card at P8. The rammap
+bands run up to 7000 MHz. nouveau has no Pascal reclock (`ramgp100.c` is init-only),
+and the nearest model is Kepler's GDDR5 `gk104_ram_calc_gddr5`. The decisive next
+test needs register writes (needs consent; a mistake costs an enclosure power cycle).
+
+Next: shim **stage 2**. The same entry points are forwarded over TCP to a macOS-side
+server around `nvpascal.Device` (alloc/copy/PTX→cubin/launch), so unmodified Mojo
+programs, then MAX graphs, run on the card.
