@@ -1,0 +1,10 @@
+globals: pagepool pa=0x11002000 bundle pa=0x11022000 attrib pa=0x11025000 (+0x5e7400)  va={'pagepool': '0x1000000', 'bundle': '0x1020000', 'attrib': '0x1030000'}
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+FECS bind_pointer(inst 0x11001000): ok  0x409800=00000010
+grctx main: sw_ctx 518, bundle 960 (icmd timeouts 0), methods {'0xc197': 1511, '0x902d': 17, '0xc1c0': 8}; idle True/True/True; PGRAPH intr 0x400100=00000000
+FECS wfi_golden_save: ok  0x409800=00000001
+generation took 2.5 s
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+golden image: 2577920 bytes, 644480 words, 478024 still 0xdeadbeef (prefill), 497698 nonzero
+  header: 00000000 000a5e00 00000006 00000000 00000000 00000000 00000000 00000000 00000000 000f0c00 00000000 00000000 00004c00 00000006 00000000 00000000
+GOLDEN CONTEXT RESULT: FAIL (prefill not overwritten)

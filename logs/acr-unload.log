@@ -1,0 +1,11 @@
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+0x10e5f8 before: 80400000  (bits[23:20] = 4)   temp 37 C
+PMU before (VBIOS PRE_OS app is about to be stopped): cpuctl=00000020 sctl=00003002 mbox0=00000000 mbox1=00000000 pc=00000a4d
+HS unload: boot_addr=0x10000 boot=512 B nmem=0x0+0x100 imem=0x100+0x900 dmem=0xa00+0x100 sig@0xa00(16)
+PMU debug-fused=False -> production signature
+MMU: inst=0x10101000 pd3=0x10100000 va=0x10000 -> ('vram', 17825792) flush=True | PMU bind: saw5=True idle=True (stat 5 -> 0) 0x480=40010101
+ACR unload: stopped=True after 1 ms  mbox0=0000001d (want 0000001d) mbox1=00000000  PMU cpuctl=00000010 sctl=00003000 mbox0=0000001d mbox1=00000000 pc=000001a5 0x10c=00000001
+0x10e5f8 after:  80000000  (bits[23:20] = 0)   temp 37 C
+MMU faults after:
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+ACR UNLOAD RESULT: PASS | state field CLEARED 4 -> 0

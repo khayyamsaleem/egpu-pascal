@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+# Vendor / card-specific binaries: never commit (see firmware/README.md)
+firmware/*
+!firmware/README.md
+!firmware/fetch.sh
+!firmware/SHA256SUMS
+golden_ctx_gp102.bin
+*.rom
+# Third-party clones (prior art, references); see README "Prior art" / NOTICE.md
+upstream/
+tools/envytools/
+# scratch
+*.bak-*
+.DS_Store

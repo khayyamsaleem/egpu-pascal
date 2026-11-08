@@ -1,0 +1,81 @@
+=== RT-2: Pascal MMU v2 page tables, on the card ===
+-- pre-flight (no writes yet)
+   PMC_BOOT_0           132000a1
+   PMC_ENABLE           5c04f121
+   PMC 0x260            bad00200
+   MMU ctrl 0x100c80    00209801
+   0x100cb8             00100000
+   0x100cbc             00000001
+   0x100cec             00000000
+   FIFO_INTR 0x2100     00000000
+   MMU_FAULT_ID 0x259c  00000000
+   SEC2 cpuctl          00000010
+   SEC2 0x0dc           000e003f
+   SEC2 0x048           00000004
+   SEC2 0x054           00000000
+   SEC2 0x090           00000040
+   SEC2 0x0a4           00000000
+   SEC2 xfer status     00000010
+   FBIF ports  00000110 00000110 00000110 00000110 00000110 00000110 00000110 00000110
+-- fb_init done, flush page IOVA 0x4000
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+-- building the address space
+   instance block @ 0x10001000, tables from @ 0x10000000
+  [PASS] VRAM scratch written and readable              
+vmm: pd3=0x10000000  6 tables  VramHeap(7 blocks, next=0x10007000)
+    4                      @ 0x10000000
+    4.0                    @ 0x10002000
+    4.0.0                  @ 0x10003000
+    4.0.0.0                @ 0x10004000
+    4.0.0.0.2              @ 0x10005000
+    4.0.0.0.3              @ 0x10006000
+    va 0x00000400000 -> vram pa=0x5000000
+    va 0x00000401000 -> vram pa=0x5001000
+    va 0x00000600000 -> vram pa=0x5010000
+    va 0x00000800000 -> unmapped
+  [PASS] tables read back from VRAM: VA_BASE            ('vram', 83886080)
+  [PASS] tables read back: VA_BASE + 4 KiB              
+  [PASS] tables read back: second PD0 slot              
+  [PASS] unmapped VA has no translation                 
+  [PASS] PTE really says VRAM (aper 0)                  
+  [PASS] instance block 0x200 = pd3 | VER2 | 64 KiB     0x10000c00
+  [PASS] instance block 0x208 = VA limit - 1            
+  [PASS] MMU invalidate completed                       0.1 ms, 0x100c80=00209801
+  [PASS] SEC2 bound to the instance block               bind status 0, 0x054=40010001
+  [PASS] VIRT port is in virtual mode                   0x604=00000110 (memtype 0 = virtual)
+-- read round trip: falcon xfer, VA 0x400000 -> DMEM
+  [PASS] xfer from mapped VA completed                  status=00000010 ctrl=00001602 pending=0
+  [PASS] DMEM holds the mapped VRAM contents            first 8: 11181f262d343b42 vs 11181f262d343b42
+-- write round trip: falcon xfer, DMEM -> VA 0x600000
+  [PASS] xfer to mapped VA completed                    status=00000010 ctrl=00001622
+  [PASS] mapped VRAM page received the DMEM contents    first 8: 404d5a6774818e9b vs 404d5a6774818e9b
+-- negative control: the same xfer from an unmapped VA must fault
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+  [PASS] no data delivered from an unmapped VA          first 8: 0000000000000000
+   fault registers after the negative control:
+FIFO_INTR=10000000 MMU_FAULT_ID(0x259c)=00040000
+  unit 18 (eng18): inst=0x10001000 addr=0x800000 hub=1 gpc=0 access=0 client=SEC reason=PDE raw=00101600
+  [PASS] an MMU fault was raised                        0x259c=00040000 0x2100=10000000
+FIFO_INTR=10000000 MMU_FAULT_ID(0x259c)=00040000
+  unit 18 (eng18): inst=0x10001000 addr=0x800000 hub=1 gpc=0 access=0 client=SEC reason=PDE raw=00101600
+  [PASS] instance block detached (0x200 zeroed)         
+-- post-test
+   PMC_BOOT_0           132000a1
+   PMC_ENABLE           5c04f121
+   PMC 0x260            bad00200
+   MMU ctrl 0x100c80    00209801
+   0x100cb8             00100000
+   0x100cbc             00000001
+   0x100cec             00000000
+   FIFO_INTR 0x2100     00000000
+   MMU_FAULT_ID 0x259c  00000000
+   SEC2 cpuctl          00000010
+   SEC2 0x0dc           000e003f
+   SEC2 0x048           00000004
+   SEC2 0x054           00000000
+   SEC2 0x090           00000040
+   SEC2 0x0a4           00000000
+   SEC2 xfer status     00000010
+   FBIF ports  00000110 00000110 00000110 00000110 00000110 00000110 00000110 00000110
+
+=== 18/18 checks passed ===

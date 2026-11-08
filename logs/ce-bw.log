@@ -1,0 +1,31 @@
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+FIFO init: 4 PBDMAs, 0x2200=00000000 0x2254=10003000, 0x204=0000000f
+teardown chid 1: was 80010201/00000003  preempt ok  empty runlist ok  now 00000000/00000000  FIFO_INTR=00000000
+channel 1: inst=0x10201000 pd3=0x10200000 userd=0x3000200 gpfifo va=0x100000 pa=0x10202000 pb va=0x200000 pa=0x10207000 runlist@0x10213000
+  runlist 5 commit: done  0x2284+5*8=00000002  chan 0x800000=80010201 0x800004=00000003
+copy    16 MiB: sem0 70000002 sem1 70000003 (ok)  gpu dt 1.406 ms  host wall 2.6 ms  traffic 23.9 GB/s  warm-up byte-exact True
+copy    64 MiB: sem0 70000004 sem1 70000005 (ok)  gpu dt 5.474 ms  host wall 6.5 ms  traffic 24.5 GB/s  warm-up byte-exact True
+copy   256 MiB: sem0 70000006 sem1 70000007 (ok)  gpu dt 21.905 ms  host wall 23.1 ms  traffic 24.5 GB/s  warm-up byte-exact True
+copy  1024 MiB: sem0 70000008 sem1 70000009 (ok)  gpu dt 87.595 ms  host wall 88.5 ms  traffic 24.5 GB/s  warm-up byte-exact True
+  probe dst+0x00000000: 0000b0b000000000ffffffff5a5a5a5a ==
+  probe dst+0x00001000: 0100b0b000100000ffefffff5a5a5a5a ==
+  probe dst+0x3ffff000: 0200b0b000f0ff3fff0f00c05a5a5a5a ==
+  probe dst+0x12345000: 0300b0b000503412ffafcbed5a5a5a5a ==
+spot check: 4/4
+sysmem 4 MiB, 1024 pages, IOVA contiguous: True
+sysmem->VRAM 4 MiB: ok  gpu dt 6.071 ms  0.69 GB/s  dst[0:16]=11111111111111111111111111111111
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+teardown chid 1: was 80010201/00000003  preempt ok  empty runlist ok  now 00000000/00000000  FIFO_INTR=00000000
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+FIFO init: 4 PBDMAs, 0x2200=00000000 0x2254=10003000, 0x204=0000000f
+channel 1: inst=0x10201000 pd3=0x10200000 userd=0x3000200 gpfifo va=0x100000 pa=0x10202000 pb va=0x200000 pa=0x10207000 runlist@0x1020f000
+  runlist 5 commit: done  0x2284+5*8=00000002  chan 0x800000=80010201 0x800004=00000003
+channel 2: inst=0x10211000 pd3=0x10210000 userd=0x3000400 gpfifo va=0x100000 pa=0x10212000 pb va=0x200000 pa=0x10217000 runlist@0x1021f000
+  runlist 6 commit: done  0x2284+6*8=00000002  chan 0x800000=80010211 0x800004=00000003
+CE2 alone          CE2 ok 87.6 ms | span 87.6 ms, aggregate traffic 24.5 GB/s
+CE3 alone          CE3 ok 86.9 ms | span 86.9 ms, aggregate traffic 24.7 GB/s
+CE2+CE3 together   CE2 ok 147.0 ms, CE3 ok 146.8 ms | span 147.0 ms, aggregate traffic 29.2 GB/s
+refpll 132020=20030001 132024=00043b01 132030=10000006  div 137320=00000000 137330=87100634  1373f4=00000011  mpll 132000=18010000
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+teardown chid 1: was 80010201/00000003  preempt ok  empty runlist ok  now 00000000/00000000  FIFO_INTR=00000000
+teardown chid 2: was 80010211/00000003  preempt ok  empty runlist ok  now 00000000/00000000  FIFO_INTR=00000000

@@ -1,0 +1,6 @@
+before: PMC_ENABLE=5c24f121 PMC_INTR0=44001000 PBUS_INTR=0000000c FIFO_INTR=18000001 0x252c=00000001
+[before] ring cmd 0x12004c=bad00100  ring intr 0x120058=bad00100  hub/rop/gpc nr=bad00100  0x120074=bad00100  0x120078=bad00100  FB 0x100ce0=bad00100  LTC 0x12006c=bad00100  PMU cpuctl=bad00100  SEC2 cpuctl=bad00100  PGRAPH 0x400700=bad00100  claim 0x10e5f8=bad00100  temp 0x20460=bad00100  top 0x22700=bad00100
+PCCSR: unbound 64 stray channels; still bound (excluding (1,)): []
+cleared: PBUS_INTR=00000000 FIFO_INTR=10000000
+ring reset: command idle=True  PMC_ENABLE=5c24f121 PMC_INTR0=04001000 PBUS_INTR=00000008
+[after] ring cmd 0x12004c=bad00100  ring intr 0x120058=bad00100  hub/rop/gpc nr=bad00100  0x120074=bad00100  0x120078=bad00100  FB 0x100ce0=bad00100  LTC 0x12006c=bad00100  PMU cpuctl=bad00100  SEC2 cpuctl=bad00100  PGRAPH 0x400700=bad00100  claim 0x10e5f8=bad00100  temp 0x20460=bad00100  top 0x22700=bad00100

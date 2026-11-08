@@ -1,0 +1,89 @@
+# egpu-pascal
+
+A from-scratch, user-space bring-up of an **NVIDIA GTX 1080 Ti (GP102, Pascal)** in a
+Thunderbolt enclosure on an **Apple Silicon MacBook Air**. It needs no NVIDIA driver and
+runs over tinygrad's TinyGPU DriverKit transport.
+
+**Status (2026-11-08):** the card POSTs from macOS, secure-boots its graphics firmware,
+and runs **ptxas-compiled sm_61 CUDA kernels** dispatched through our own channel/QMD code.
+Results land in Mac host memory. Next phase: model inference through **Modular MAX**.
+Full results: **[RESULTS.md](RESULTS.md)**.
+
+```
+rung 0  transport + VBIOS POST from macOS + 11 GB VRAM   DONE
+rung 1  our microcode on a falcon                         DONE
+rung 2  ACR secure boot, FECS/GPCCS running               DONE
+rung 3  MMU v2 + GPFIFO channel + copy engine             DONE
+rung 4  compute dispatch: sm_61 vadd -> host memory        DONE
+rung 5  model inference (MAX)                              next
+```
+
+Boot clocks only for now: 607 MHz SM, 405 MHz memory (~30 GB/s measured).
+
+## Requirements
+
+* Apple Silicon Mac, a TB3/USB4 eGPU enclosure, a GP102 card (validated: EVGA GTX 1080 Ti)
+* tinygrad's **TinyGPU** DriverKit extension installed and enabled; Python venv with
+  `tinygrad==0.14.0` (scripts assume `~/.venvs/tinygpu/bin/python`; the transport
+  socket is `/tmp/tinygpu.sock`)
+* firmware: `firmware/fetch.sh` (NVIDIA signed blobs from linux-firmware) and
+  `pascal/dump_vbios.py` (this card's VBIOS); see [firmware/README.md](firmware/README.md)
+* kernels: Docker (OrbStack works) for CUDA 12.4 `ptxas` via `kernels/build.sh`
+* optional: [envytools](https://github.com/envytools/envytools) cloned and built in
+  `tools/envytools` (falcon/SASS disassembly, rnndb)
+
+## Run
+
+```sh
+PY=~/.venvs/tinygpu/bin/python
+# cold card (after an enclosure power cycle)
+$PY pascal/devinit.py firmware/gp102_vbios.rom
+$PY pascal/fb.py
+# every session
+$PY pascal/reset_engines.py      # PFIFO + GR engine reset
+$PY pascal/gr.py                 # ACR -> SEC2 RTOS -> FECS/GPCCS -> GR init   (GR BRING-UP RESULT: PASS)
+$PY pascal/compute.py            # RT-4: sm_61 vadd -> host memory             (RESULT: PASS)
+$PY pascal/bench.py              # SM clock + DRAM bandwidth via the runtime
+```
+
+Other gates: `pascal/mmu.py --selftest` (offline), `pascal/mmu_test.py` (RT-2, 18/18),
+`pascal/fifo.py` (RT-3 copy engine), `pascal/grchan.py` (GR channel), `pascal/ce_bw.py`.
+
+## Using the runtime
+
+```python
+import nvpascal, struct
+dev = nvpascal.Device()                         # GR channel + compute state
+k = dev.load("kernels/vadd.sm_61.cubin")["vadd"]
+a, b = dev.alloc(4096 * 4), dev.alloc(4096 * 4) # VRAM
+c = dev.alloc_host(4096 * 4)                    # Mac memory through the IOMMU
+ns = dev.launch(k, (32, 1, 1), (128, 1, 1), struct.pack("<QQQI", a.va, b.va, c.va, 4096))
+```
+
+## Layout
+
+| Path | What |
+|---|---|
+| `pascal/` | the driver: `card` (BAR0/PRAMIN), `devinit`/`vbios`, `fb`, `mmu`, `acr`/`acr_unload`, `sec2_rtos`, `gr`/`gr_ctxctl`/`grctx`, `fifo`, `grchan`, `compute`, **`nvpascal`** (runtime), `cubin`, `bench`, `fecs_snap`, probes, recovery |
+| `kernels/` | PTX sources, built sm_61 cubins, `Dockerfile` + `build.sh` |
+| `tools/nvclass`, `tools/nvkm`, `tools/mesa` | vendored references (MIT): NVIDIA class/QMD headers, nouveau, Mesa |
+| `docs/` | the chronological evidence trail and per-session handoffs |
+| `logs/` | hardware output cited by RESULTS.md and the docs |
+| `probes/phase0/` | the first read-only probes and RT-0/RT-1 microcode tests |
+| `PLAN.md` | the plan of record (phases, routes, odds) |
+
+## Safety notes
+
+* An out-of-range or wrong BAR0 write can take the PRI ring down; recovery is an
+  enclosure power cycle. `card.py` asserts the BAR0 range.
+* Never write falcon `0x000/0x004/0x010/0x014` (IRQ set/clear registers) from a probe.
+* tinygrad's own NV runtime will issue a PCIe FLR on Pascal (it misreads a Turing WPR2
+  register); don't point `NV=1` tinygrad at this card.
+
+## Prior art and credits
+
+* [TheTom/pascal-egpu](https://github.com/TheTom/pascal-egpu): the earlier Pascal-over-TinyGPU
+  attempt (register access on GP106). This repo is an independent implementation, not a fork.
+  Its "POST is impossible" conclusion didn't hold on GP102.
+* [Davinchy/macuda](https://github.com/Davinchy/macuda): the CUDA-shim design for eGPUs on macOS (GSP cards).
+* nouveau, Mesa, envytools, NVIDIA open-gpu-doc, tinygrad: see [NOTICE.md](NOTICE.md).

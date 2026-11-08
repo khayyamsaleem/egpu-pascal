@@ -1,0 +1,20 @@
+before: PMC=4060f121 FECS 0x409800=00004c00 sctl=00007021 PGRAPH 0x400500=00010001
+  reset bit 8 -> PMC=4060f121
+  reset bit 12 -> PMC=4060f121
+after:  PMC=4060f121 FECS sctl=00003000 cpuctl=00000010 0x409800=00000000 GPCCS sctl=00003000 PGRAPH intr=00000000 0x400500=00000000
+  FIFO_INTR=00000000 0x25a0=00000000 PBDMA0 0x40108=00000000
+    screen_tile_row_offset=3 tiles=[2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 0]
+    sm_nr=28
+GR init: sw_nonctx 312 writes, idle after nonctx=True, swdx_pes_mask=0x777777, zcull magic=0x4924a
+  PGRAPH status 0x400700=00000000 0x40060c=00000000  intr 0x400100=00000000  FECS 0x409c18=00000000
+bootstrap FECS/GPCCS: ['0x0', '0x0']
+FECS  before: cpuctl=00000050 sctl=00007021 bootvec=00005c00 mbox0=00000000
+GPCCS before: cpuctl=00000050 sctl=00007021 bootvec=00000000 mbox0=00000000
+FECS ready bit (0x409800 & 1): True after 1 ms; 0x409800=00000001
+FECS  after: cpuctl=00000060 sctl=00007021 pc=0000255b mbox0=00000000 mbox1=00000000
+GPCCS after: cpuctl=00000060 sctl=00007021 pc=00000698 mbox0=00000000 mbox1=00000000
+  FECS method 0x10 (ctx image size): 0x146500 (1336576 bytes)
+  FECS method 0x16 (zcull image size): 0xf0c00 (986112 bytes)
+  FECS method 0x25 (pm image size): 0x4c00 (19456 bytes)
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+GR BRING-UP RESULT: PASS {'ctx image': 1336576, 'zcull image': 986112, 'pm image': 19456}

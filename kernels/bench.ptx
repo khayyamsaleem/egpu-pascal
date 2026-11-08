@@ -1,0 +1,70 @@
+//
+// Measurement kernels for the GP102 runtime (pascal/bench.py).
+//
+.version 7.0
+.target sm_61
+.address_size 64
+
+// dst[i] = src[i] over n16 16-byte elements, grid-stride loop.
+.visible .entry bw_copy(
+    .param .u64 psrc,
+    .param .u64 pdst,
+    .param .u64 pn16
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<12>;
+    .reg .b64 %rd<12>;
+
+    ld.param.u64 %rd1, [psrc];
+    ld.param.u64 %rd2, [pdst];
+    ld.param.u64 %rd3, [pn16];
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mov.u32 %r4, %nctaid.x;
+    mul.wide.u32 %rd4, %r1, %r2;
+    cvt.u64.u32 %rd5, %r3;
+    add.u64 %rd4, %rd4, %rd5;          // i
+    mul.wide.u32 %rd6, %r4, %r2;       // stride
+LOOP:
+    setp.ge.u64 %p1, %rd4, %rd3;
+    @%p1 bra DONE;
+    shl.b64 %rd7, %rd4, 4;
+    add.s64 %rd8, %rd1, %rd7;
+    add.s64 %rd9, %rd2, %rd7;
+    ld.global.v4.u32 {%r5, %r6, %r7, %r8}, [%rd8];
+    st.global.v4.u32 [%rd9], {%r5, %r6, %r7, %r8};
+    add.u64 %rd4, %rd4, %rd6;
+    bra LOOP;
+DONE:
+    ret;
+}
+
+// One thread: spin until %clock64 has advanced by `spins` cycles (cannot be optimised
+// away: the exit condition reads the clock), timestamps from %globaltimer around it.
+// out[0] = t0, out[1] = t1 (ns), out[2] = c0, out[3] = c1 (SM cycles)
+.visible .entry clk(
+    .param .u64 pout,
+    .param .u64 pspins
+)
+{
+    .reg .pred %p<2>;
+    .reg .b64 %rd<10>;
+
+    ld.param.u64 %rd1, [pout];
+    ld.param.u64 %rd6, [pspins];
+    mov.u64 %rd2, %globaltimer;
+    mov.u64 %rd3, %clock64;
+SPIN:
+    mov.u64 %rd5, %clock64;
+    sub.u64 %rd7, %rd5, %rd3;
+    setp.lt.u64 %p1, %rd7, %rd6;
+    @%p1 bra SPIN;
+    mov.u64 %rd4, %globaltimer;
+    st.global.u64 [%rd1], %rd2;
+    st.global.u64 [%rd1+8], %rd4;
+    st.global.u64 [%rd1+16], %rd3;
+    st.global.u64 [%rd1+24], %rd5;
+    ret;
+}

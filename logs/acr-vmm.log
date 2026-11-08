@@ -1,0 +1,20 @@
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+WPR: shadow=0x2000000 wpr=0x2040000-0x2080000 used=0xae00
+  LSF fecs  id=2 lsb=0x300 img=0x1000(+0x5c00) bld=0x6c00 ucode=0x5300 data=0x900 ver=2
+  LSF gpccs id=3 lsb=0x6d00 img=0x7000(+0x3d00) bld=0xad00 ucode=0x3500 data=0x800 ver=2
+HS: boot_addr=0xfd00 boot=512 B nmem=0x0+0x100 imem=0x100+0x2800 dmem=0x2900+0x1000 sig@0x3820(16)
+SEC2 debug-fused=False -> production signature
+MMU: inst=0x10001000 pd3=0x10000000 join=0x10000c00 va=0x10000+0x5000 flush=True
+  walk va 0x10000 -> ('vram', 16777216) (read back out of the VRAM page tables)
+SEC2 instance block bound=True  bind status=0  0x054=40010001  0x604=00000110
+ACR HS: stopped=True after 2 ms  mbox0=00000025 mbox1=00000000  SEC2 cpuctl=00000010 sctl=00003002 mbox0=00000025 mbox1=00000000 pc=00001336 0x10c=00000081
+WPR2 regs: start=0x1ffffe0000 limit=0x20000  (expected 0x2040000-0x2080000)
+  WPR hdr[0] (in WPR) 00000000 00000000 00000000 00000000 00000000 00000000
+  WPR hdr[1] (in WPR) 00000000 00000000 00000000 00000000 00000000 00000000
+  WPR hdr[2] (in WPR) 00000000 00000000 00000000 00000000 00000000 00000000
+FECS  cpuctl=00000010 sctl=00003000 mbox0=00000000 mbox1=00000000 pc=00000006 0x10c=00000001
+GPCCS cpuctl=00000010 sctl=00003000 mbox0=00000000 mbox1=00000000 pc=0000b129 0x10c=00000001
+WPR2 regs: start=0x1ffffe0000 limit=0x20000  (expected 0x2040000-0x2080000)
+MMU faults (what the card objected to):
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+ACR RESULT: FAIL

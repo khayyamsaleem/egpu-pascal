@@ -1,0 +1,174 @@
+# Results: a GTX 1080 Ti (GP102) running compute kernels from a MacBook Air M1
+
+Compiled 2026-11-08 from sessions 1–6. Every claim below was measured on the
+card, with a negative control where one applies. The evidence trail is in
+[`docs/evidence-log.md`](docs/evidence-log.md) and the raw output is in [`logs/`](logs/).
+
+**Bottom line:** the card goes from cold power-on to running ptxas-compiled sm_61
+kernels, with results landing in Mac host memory, entirely from macOS over
+Thunderbolt and with no NVIDIA driver. Rungs 0–4 of the ladder are done. Rung 5
+(model inference, the target being Modular MAX) is next. The card currently runs
+at boot clocks: **607 MHz SM, 405 MHz memory, about 30 GB/s DRAM bandwidth**.
+
+| | |
+|---|---|
+| Host | MacBook Air M1 (MacBookAir10,1), 16 GB, macOS 26.6.2 |
+| Enclosure | Razer Core X V2 (Intel `8086:5786` bridge), TB3/USB4 port, PCIe Gen3 x4 |
+| Card | EVGA GTX 1080 Ti, GP102 rev A1 (`10de:1b06`, subsystem `3842:6696`), 11 GB GDDR5X |
+| Transport | tinygrad's TinyGPU DriverKit dext + `APLRemotePCIDevice` (tinygrad 0.14.0) |
+
+---
+
+## 1. The ladder
+
+| Rung | Milestone | Status | Proof (script → log) |
+|---|---|---|---|
+| 0 | Transport, identification, VBIOS POST from macOS, all VRAM usable | **DONE** | `devinit.py`, `fb.py`, `vram_test.py` |
+| 1 | A falcon runs microcode we wrote (DMEM/IMEM round trip) | **DONE** | `probes/phase0/rt0_*.py`, `rt1*.py` |
+| 2 | ACR secure boot: WPR2 up, signed SEC2 RTOS bootstraps FECS + GPCCS | **DONE** | `acr.py` → `logs/acr-pass.log`, `sec2_rtos.py` → `logs/sec2-rtos.log`, `gr_ctxctl.py` |
+| 3 | MMU v2 page tables + a GPFIFO channel; copy engine VRAM↔host memory | **DONE** | `mmu_test.py` (18/18) → `logs/mmu-test.log`, `fifo.py` → `logs/rt3-ce.log` |
+| 4a | GR channel: FECS context switch, PGRAPH executes `PASCAL_COMPUTE_B` methods | **DONE** | `grchan.py` → `logs/s6-grchan-pass.log` |
+| 4 | **Compute dispatch: an sm_61 vector-add writes correct results to host memory** | **DONE** | `compute.py` → `logs/s6-compute.log` (4059/4059, 3/3 runs) |
+| 5 | Model inference (MAX) on the card | not started | plan in §7 |
+
+Run order on a warm card: `reset_engines.py` → `gr.py` → `compute.py` (or
+`bench.py`). On a cold card, run `devinit.py firmware/gp102_vbios.rom` then `fb.py` first.
+
+## 2. What the bring-up chain is
+
+Each step is a port of nouveau (and of Mesa for compute), driven over BAR0/BAR1
+through the TinyGPU transport. Every wait is a poll; this transport has no
+interrupts.
+
+1. **POST from macOS** (`pascal/devinit.py`, `vbios.py`): run the VBIOS DEVINIT
+   scripts from the host. Takes about 42 ms. The card comes up with GDDR5X trained
+   at the boot clock.
+2. **VRAM unlock** (`pascal/fb.py`): boot NVIDIA's signed NVDEC `scrubber.bin`
+   once per power cycle to clear the VPR hole. All 11 GB are then usable.
+3. **MMU v2** (`pascal/mmu.py`): 49-bit VA, 5-level tables, instance blocks,
+   invalidates. Proven 18/18 on the card (a falcon DMA through our page tables,
+   plus an MMU fault naming our instance on an unmapped VA).
+4. **ACR secure boot** (`pascal/acr.py`, `acr_unload.py`): nouveau's gp102 ACR on
+   SEC2 (at `0x87000` in the low aperture, not `0x840000`). WPR2 =
+   `0x18040000–0x18080000`; the host is refused inside it. Repeatable, because
+   the unload runs first.
+5. **SEC2 RTOS → FECS/GPCCS** (`pascal/sec2_rtos.py`): `ACR_BOOTSTRAP_FALCON`
+   returns error 0 for both. FECS answers methods (ctx image `0x146500`, zcull
+   `0xf0c00`, pm `0x4c00`).
+6. **GR init + golden context** (`pascal/gr.py`, `grctx.py`): 6 GPCs, 28 SMs
+   (`tpc_nr = [4,4,5,5,5,5]`). The golden image is `0xa5e00` bytes.
+7. **FIFO + copy engine** (`pascal/fifo.py`): runlist, TSG, RAMFC, USERD through
+   physical BAR1. CE copies VRAM↔VRAM and VRAM↔host memory byte-exact.
+8. **GR channel** (`pascal/grchan.py`): the golden image is patched per channel
+   (mmio list, priv mappings of pagepool/bundle/attrib, `inst+0x210 = ctx VA | 4`).
+   FECS context-switches the channel in (CURRENT_CTX = NEW_CTX = our instance).
+9. **Compute** (`pascal/compute.py`, `nvpascal.py`): Mesa's compute state, a QMD
+   v02_01 built from NVIDIA's `clc1c0qmd.h`, cbuf0 laid out per the sm_6x ABI,
+   `SEND_PCAS_A/SEND_SIGNALING_PCAS_B`, then `WAIT_FOR_IDLE` + report semaphore.
+
+## 3. Measured performance (boot clocks)
+
+| Quantity | Measured | Spec / reference | How |
+|---|---|---|---|
+| SM clock | **607 MHz** | 1480 base / 1582 boost | `%clock64` vs `%globaltimer`, 10M and 200M cycles (`bench.py`) |
+| FP32 peak (derived) | **~4.35 TFLOPS** | ~11.3 | 3584 cores × 2 × 0.607 GHz |
+| Memory clock | **405 MHz** (refpll path, MPLL off) | 5505 (P0) | `0x1373f4 = 0x11`, `0x132000` bit 0 clear, refpll M=1 N=59 P=4 |
+| DRAM bandwidth, SM kernel | **30.1 GB/s** | 484 GB/s | 16-B ld/st grid-stride copy, 64/256 MiB, 2 grid shapes (`bench.py`) |
+| DRAM bandwidth, copy engines | 24.5 GB/s (1 CE), 29.2 GB/s (2 CEs) | — | `ce_bw.py`, `ce_bw2.py`; CE timestamps, so no TB latency |
+| Host memory → VRAM (CE over TB) | 0.69 GB/s | link ~3 GB/s | 4 MiB, IOMMU 4 KiB pages |
+| Launch + completion latency | ~1 ms end to end (host-observed) | — | `compute.py` |
+
+**What this means for models.** Token generation is bandwidth-bound. At about
+30 GB/s, the card is below the M1 Air's own 68 GB/s. Prompt processing is
+compute-bound, and there the card is ahead (~4.35 vs ~2.6 TFLOPS). So the payoff
+for decode depends on a **memory reclock**, which no open driver has done on
+Pascal (§7).
+
+## 4. Blockers hit, and their root causes
+
+| # | Symptom | Root cause | Fix |
+|---|---|---|---|
+| 1 | Upstream (`pascal-egpu`) concluded POST from the host was impossible ("circular dependency") | It isn't: the VBIOS DEVINIT scripts run fine from the host | `devinit.py` |
+| 2 | VRAM above a hole unusable | VPR region locked at boot | signed NVDEC scrubber (`fb.py`) |
+| 3 | SEC2 "missing" at `0x840000` | GP102 SEC2 lives at `0x87000` (low aperture); engines show PRI poison until enabled in PMC | correct base, PMC enable |
+| 4 | ACR HS load hung / PRIV_VIOLATION | ctx DMA had to be virtual through a bound instance block | `ctx_dma = VIRT` + instance bind |
+| 5 | ACR exit `0x25` | WPR below `0x18000000` | `WPR_ALLOC_ADDR = 0x18000000` |
+| 6 | ACR exit `0x29` on every retry | **Self-inflicted.** `0x10e5f8[23:20]` is an ACR claim field (HW mutex) that a failed load leaves at 4 | run nouveau's gp102 unload on the PMU first (`acr_unload.py`) |
+| 7 | PRI ring down (session 4) | a GR-init bug | enclosure power cycle; `card.py` now asserts BAR0 range |
+| 8 | GR channel never loaded (`0x800004 = 0x11000001`) | PFIFO `ENG_FAULT` (`0x262c`) latched for PGRAPH | W1C before bind |
+| 9 | **GR channel: PBDMA0 INTR_0 bit 24 at load; FECS never asked to switch** | **Runlist 0 also carries the GR copy engines CE/CE1 (engines 7/8, PMC bits 6/7), and both were held in reset.** Bit 24 is ENG_RESET (nvgpu's name, cleared by the GPU itself) | take every engine on GR's runlist out of reset (nvgpu enables all CEs at power-on) |
+| 10 | PGRAPH DATA_ERROR INVALID_ENUM on the report semaphore | compute `SET_REPORT_SEMAPHORE_D`: OPERATION 1 isn't valid on `0xc1c0` (RELEASE = 0) | `D = 1 << 28` |
+| 11 | clock probe read 0 ns | ptxas removed the side-effect-free spin loop | spin on `%clock64` itself |
+
+## 5. Beliefs that turned out wrong (don't re-learn these)
+
+* "Pascal can't be POSTed from the host" (upstream): wrong, see #1.
+* "`0x29` means PMU firmware is missing": wrong, it was our own leftover claim (#6).
+* Session 5's reading of the rung-4 stall: wrong, because the registers were misread.
+  * `0x409014` is falcon **IRQMCLR** (write-only), not the mask. The real mask
+    `0x409018 = 0x8704` already enables the channel-switch interrupt. Writing
+    `0xffffffff` there disabled every FECS interrupt for that boot, which tainted
+    the experiments that followed.
+  * `0x4098cc` / `0x40984c` are mailbox SET/CLEAR registers. They always read 0
+    and say nothing about whether the handler ran.
+  * PCCSR `0x800004`: bits 24:27 are STATUS (5 = ON_PBDMA, 7 = ON_ENG), bit 28 is
+    BUSY, and bit 1 is NEXT (not "ACTIVE").
+  * `0x409b04 = 0x8001160c` was left over from `bind_pointer`, not a pending
+    request. A clean reproduction showed FECS was never asked at all.
+* FECS DMEM and ICD are locked to the host in LS mode (`0xbadf548a` /
+  `0xbadfbadf`). The trace-PC buffer (`0x148`/`0x14c`) still works and is the one
+  view into FECS.
+* MAX "plugs in a new accelerator through a device-driver connector": that
+  generic seam isn't shipped yet. See §6.
+
+## 6. MAX (target) feasibility findings
+
+Researched 2026-11-08; links below.
+
+* Qualcomm completed its acquisition of Modular on 2026-07-28. MAX's NVIDIA path
+  is `DeviceContext` over **`libcuda.so.1` + `libnvidia-ml.so.1`**, and the
+  documented library paths are Linux only. The "next-generation, more generic"
+  DeviceContext for hardware vendors is described as in progress.
+* Kernels are compiled ahead of time with a bundled CUDA-13 `libnvptxcompiler`,
+  which has no Pascal. The escape hatch is **`MODULAR_NVPTX_COMPILER_PATH` =
+  system `ptxas`** (our CUDA 12.4 one).
+* Nightlies went "Turing and newer, driver ≥ 580" in Feb 2026. Pascal ran basic
+  graphs on Sept 2025 nightlies, so the code paths aren't foreign. The
+  architecture table is `gpu/host/info.mojo` (patchable locally).
+* MAX's built-in matmul needs sm_80, and tensor-core/async paths need sm_80+.
+  Pascal (no tensor cores, 1/64-rate fp16) needs SIMT fallbacks for matmul,
+  attention and quantized-weight kernels.
+* So the integration seam is a **libcuda/NVML shim** that forwards to this
+  project's runtime. It reports driver ≥ 580 and compute capability 6.1. The
+  likely topology is MAX for Linux-aarch64 in a container, forwarding over a
+  socket to the macOS-side driver.
+
+Sources: [forum: older NVIDIA GPUs](https://forum.modular.com/t/support-for-older-nvidia-gpus-and-drivers-in-mojo-and-max/2761) ·
+[forum: GTX 1050 Pascal](https://forum.modular.com/t/compatability-for-gp107m-geforce-gtx-1050-mobile/1750) ·
+[Modular × Qualcomm](https://www.modular.com/blog/modcon-qualcomm) ·
+[acquisition](https://www.modular.com/blog/qualcomm-completes-acquisition-of-modular) ·
+[MAX hardware compatibility](https://max.modular.com/gpu/hardware-compatibility/) ·
+[Mojo requirements](https://mojolang.org/docs/requirements/)
+
+## 7. Next phase (rung 5): MAX on this card
+
+1. **Reclock feasibility (read-only first):** parse the VBIOS perf/memory-clock
+   tables; check whether the MPLL/FBPA registers are host-writable (PLM/priv
+   level) before any write. Any write needs consent, because a mistake costs an
+   enclosure power cycle.
+2. **Driver as a service:** expose `nvpascal.Device` (alloc / copy / load cubin /
+   launch / sync) over a socket with a CUDA-driver-shaped API.
+3. **libcuda + NVML shim** (C, Linux-aarch64): the subset MAX actually calls.
+   Get the call list by running MAX against a logging stub first.
+4. **MAX patches:** sm_61 target entry, `MODULAR_NVPTX_COMPILER_PATH`, then SIMT
+   fallbacks for matmul / attention / quantized matmul.
+5. **First model:** a small Llama (1B) end to end, then an 8B 4-bit model.
+
+## 8. Toolchain and reproduction
+
+* Python: `~/.venvs/tinygpu` (3.12, tinygrad 0.14.0).
+* Firmware: `firmware/fetch.sh` (linux-firmware) + `pascal/dump_vbios.py`;
+  checksums in `firmware/SHA256SUMS`.
+* Kernels: `kernels/build.sh` (Docker image `egpu-ptxas:12.4`, ptxas
+  `-arch=sm_61`). Inspect with `pascal/cubin.py` and `envydis -m gm107`.
+* Offline test: `pascal/mmu.py --selftest`.

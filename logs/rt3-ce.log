@@ -1,0 +1,23 @@
+CE2: engine 5 runlist 5 reset bit 21 -> PBDMA2
+PMC_ENABLE 5c24f121
+FIFO_INTR=00000001 MMU_FAULT_ID(0x259c)=00000000
+FIFO init: 4 PBDMAs, 0x2254=10003000, 0x204=0000000f
+negative control before kick: dst==src False, sem0=00000000, sem1=00000000
+teardown chid 1: was 80010201/00000003  preempt ok  empty runlist ok  now 00000000/00000000  FIFO_INTR=00000000
+channel 1: inst=0x10201000 pd3=0x10200000 userd=0x3000200 gpfifo va=0x100000 pa=0x10202000 pb va=0x200000 pa=0x10207000 runlist@0x10212000
+  runlist 5 commit: done  0x2284+5*8=00000002  chan 0x800000=80010201 0x800004=00000003
+pushbuffer: 22 words; before kick: GP_GET=0 GP_PUT=0 chan=00000003 FIFO_INTR=00000000 | PBDMA2 008=03000200 00c=00000000 014=00000000 048=00100000 04c=00090000 054=00000000 084=60400000 0e8=00000001 108=00000000 148=00000000
+after kick (1 ms): GP_GET=1 GP_PUT=1 chan=00000003 FIFO_INTR=00000000 | PBDMA2 008=03000200 00c=00000000 014=00000001 048=00100000 04c=00090000 054=00200058 084=60400000 0e8=00000001 108=00000000 148=00000000
+  host semaphore: 5e4a0001 (RELEASED)
+  CE semaphore:   c0de0002 (RELEASED)
+  dst == src: True (first words 0b30557a9fc4e90e33587da2c7ec1136)
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+RT-3 RESULT: PASS
+
+sysmem (sys_coh) pages at IOVA 0x4000 / 0x5000
+negative control: VRAM dst==host pattern False, host page1==VRAM pattern False
+after kick 2 (1 ms): GP_GET=2 GP_PUT=2 chan=00000003 FIFO_INTR=00000000
+  host -> VRAM (CE reads sysmem):  sem True, VRAM dst == host pattern: True
+  VRAM -> host (CE writes sysmem): sem True, host page == VRAM pattern: True  (c8d5e2effc091623303d4a5764717e8b)
+FIFO_INTR=00000000 MMU_FAULT_ID(0x259c)=00000000
+RT-3 SYSMEM RESULT: PASS

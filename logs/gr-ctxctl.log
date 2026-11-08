@@ -1,0 +1,9 @@
+FECS  before: cpuctl=00000050 sctl=00007021 bootvec=00005c00 mbox0=00000000
+GPCCS before: cpuctl=00000050 sctl=00007021 bootvec=00000000 mbox0=00000000
+FECS ready bit (0x409800 & 1): True after 1 ms; 0x409800=00000001
+FECS  after: cpuctl=00000060 sctl=00007021 pc=0000255b mbox0=00000000 mbox1=00000000
+GPCCS after: cpuctl=00000060 sctl=00007021 pc=00000698 mbox0=00000000 mbox1=00000000
+  FECS method 0x10 (ctx image size): 0x146500 (1336576 bytes)
+  FECS method 0x16 (zcull image size): 0xf0c00 (986112 bytes)
+  FECS method 0x25 (pm image size): 0x4c00 (19456 bytes)
+GR CTXCTL RESULT: PASS (FECS running and answering methods)
