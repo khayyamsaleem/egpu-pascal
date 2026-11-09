@@ -215,5 +215,22 @@ mode, where kernels aren't executed: 1/4096. MAX pooled 1843 MiB of the 2 GiB
 reported (mapped in 0.12 s), handed over PTX (JIT'd server-side with ptxas sm_61),
 and the kernel ran in 8–14 µs. See [`shim/README.md`](shim/README.md).
 
-Next: MAX graphs and models. MAX's built-in kernels (matmul etc.) need sm_80+, so
-that's where Pascal fallbacks are required.
+**A MAX graph runs on the card.** `shim/tests/graph_add.py` (Python `max.graph` +
+`max.engine.InferenceSession` on `Accelerator()`) compiles `a*2 + b` into one fused
+elementwise kernel. MAX's graph compiler produced the **cubin** itself, through the
+external ptxas. It ran on the GP102 with **max abs error 0 vs numpy**, repeatably (the
+server releases each process's pool on disconnect).
+
+**Current blocker: matmul.** `ops.matmul` fails to compile for sm_61 with `LLVM ERROR:
+Cannot select: intrinsic llvm.nvvm.shfl.sync.idx.i32`. A 3-line warp-shuffle kernel
+(`shim/tests/shfl.mojo`) reproduces it. Root cause, in MAX's source
+(`max/mojo/max/_plugin/cuda/targets.mojo`): the GTX 1080 Ti target hardcodes
+`features = "+ptx50,+sm_61"`. PTX 5.0 predates `shfl.sync` (PTX 6.0), which Pascal
+hardware supports; Turing's target uses `+ptx63`, Ampere's `+ptx81`. There's no
+plugin/override path: `TARGETS` is a fixed list in `_overlay.mojo`, and a second
+`sm_61` entry is a "must match exactly one target" error. **Fix:** edit that features
+line to `+ptx63,+sm_61` and rebuild the `max` Mojo library (bazel `mojo_library(name =
+"max")` in `max/mojo/max/BUILD.bazel`) from a modular/modular checkout, with the
+installed Mojo 1.1.0 compiler (the package header's build ID matches the compiler,
+not a source commit). After that, expect sm_80-only paths inside matmul/attention to
+need SIMT fallbacks.

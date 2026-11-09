@@ -40,3 +40,18 @@ NEXT, IN ORDER
   4. MAX: Linux-aarch64 MAX in a container + a libcuda/NVML shim forwarding to (3); MAX compile via
      MODULAR_NVPTX_COMPILER_PATH=<CUDA 12 ptxas>, target table patch for sm_61; then SIMT fallbacks for
      matmul / attention / quant kernels (MAX built-in matmul needs sm_80).
+
+UPDATE (end of session 6, phase 6 work)
+---------------------------------------
+* Repo: ~/dev/egpu-pascal (git, main); ~/egpu-pascal symlinks to it. RESULTS.md is the compiled summary.
+* Shim: shim/ (README.md). Mojo GPU programs and elementwise MAX graphs run on the card:
+    Mac:       pascal/reset_engines.py, pascal/gr.py, pascal/shimd.py --vram-limit-gib 2
+    container: docker `maxlab` (python:3.12 + modular 26.6.0 + nvidia-cuda-nvcc-cu12==12.4.131),
+               /repo = repo; shim/build.sh; env LD_LIBRARY_PATH=/repo/shim/build SHIM_MODE=remote
+               MODULAR_NVPTX_COMPILER_PATH=<ptxas>; mojo build --target-accelerator=nvidia:61
+    tests:     shim/tests/vadd.mojo (4096/4096), shim/tests/graph_add.py add (err 0)
+* NEXT: matmul blocker = MAX target "+ptx50,+sm_61" (no shfl.sync). Edit
+  max/mojo/max/_plugin/cuda/targets.mojo (_gtx1080ti_target features -> "+ptx63,+sm_61"),
+  rebuild the `max` mojo library from modular/modular with Mojo 1.1.0, install into the
+  container's modular/lib/mojo (back up max.mojoc first), rerun graph_add.py matmul.
+  Then: SIMT fallbacks where matmul/attention need sm_80; memory reclock needs consent for writes.

@@ -60,18 +60,22 @@ class Server:
     def info(self, p):
         return struct.pack("<QQIII", self.limit - self.used, self.limit, 28, 607000, 405000)
 
-    def alloc(self, p):
+    def alloc(self, p, owner=None):
         (n,) = struct.unpack("<Q", p)
         if self.used + n > self.limit:
             raise Cu(CUDA_ERROR_OUT_OF_MEMORY)
         t0 = time.time()
         buf = self.dev.alloc(n)
         self.used += buf.size
+        if owner is not None:
+            owner.append(buf.va)
         print("  alloc %d MiB -> va %#x (%.2f s)" % (n >> 20, buf.va, time.time() - t0), flush=True)
         return struct.pack("<Q", buf.va)
 
-    def free(self, p):
+    def free(self, p, owner=None):
         (va,) = struct.unpack("<Q", p)
+        if owner is not None and va in owner:
+            owner.remove(va)
         buf, off = self.dev.find(va)
         self.used -= buf.size
         self.dev.free(va)
@@ -169,15 +173,25 @@ class Server:
             threading.Thread(target=self._client_thread, args=(conn, addr), daemon=True).start()
 
     def _client_thread(self, conn, addr):
+        owned = []
         try:
-            self._client(conn)
+            self._client(conn, owned)
         except (ConnectionError, EOFError):
             pass
         finally:
             conn.close()
-            print("shimd: client %s gone" % (addr,), flush=True)
+            n_owned = len(owned)
+            with self.lock:
+                for va in list(owned):
+                    self.free(struct.pack("<Q", va), owned)
+                if not self.dev.allocs:                  # nothing live: rewind the bump heaps
+                    self.dev.data_heap = nvpascal.nvmmu.VramHeap(base=nvpascal.DATA_PA0)
+                    self.dev.va_next = nvpascal.DATA_VA0
+                    self.used = 0
+            print("shimd: client %s gone (released %d allocations, %d MiB in use)"
+                  % (addr, n_owned, self.used >> 20), flush=True)
 
-    def _client(self, conn):
+    def _client(self, conn, owned):
         def recvn(n):
             b = bytearray()
             while len(b) < n:
@@ -192,7 +206,8 @@ class Server:
             status, out = 0, b""
             try:
                 with self.lock:
-                    out = getattr(self, self.OPS[op])(payload)
+                    fn = getattr(self, self.OPS[op])
+                    out = fn(payload, owned) if op in (2, 3) else fn(payload)
             except Cu as e:
                 status = e.code
             except KeyError as e:
