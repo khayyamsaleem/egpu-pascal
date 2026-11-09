@@ -97,7 +97,7 @@ def compute_state(tls_va, per_sm, code_va):
     return pb
 
 
-def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800):
+def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800, dyn_shared=0):
     q = Qmd()
     q.set("SM_GLOBAL_CACHING_ENABLE", 1)
     q.set("RELEASE_MEMBAR_TYPE", 1)            # FE_SYSMEMBAR
@@ -111,7 +111,7 @@ def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800):
     q.set("CTA_RASTER_WIDTH", grid[0]); q.set("CTA_RASTER_HEIGHT", grid[1]); q.set("CTA_RASTER_DEPTH", grid[2])
     q.set("CTA_THREAD_DIMENSION0", block[0]); q.set("CTA_THREAD_DIMENSION1", block[1])
     q.set("CTA_THREAD_DIMENSION2", block[2])
-    q.set("SHARED_MEMORY_SIZE", nvmmu.align(k["shared"], 0x100))
+    q.set("SHARED_MEMORY_SIZE", nvmmu.align(k["shared"] + dyn_shared, 0x100))
     q.set("SHADER_LOCAL_MEMORY_LOW_SIZE", 0)
     q.set("SHADER_LOCAL_MEMORY_HIGH_SIZE", 0)
     q.set("SHADER_LOCAL_MEMORY_CRS_SIZE", crs)

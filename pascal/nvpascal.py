@@ -89,6 +89,7 @@ class Device:
         self.slot = 0
         self.seq = 0x100
         self.va_next = DATA_VA0
+        self.allocs = []                        # (va, size, Buffer), sorted by va
         self._submit(compute.compute_state(TLS_VA, TLS_PER_SM, CODE_VA), "compute state")
 
     def _clear_faults(self):
@@ -109,7 +110,29 @@ class Device:
         if zero:
             self.c.vram_write(pa, bytes(size))
         self.ch.vmm.map(va, pa, size)
-        return Buffer(self, va, pa, size)
+        buf = Buffer(self, va, pa, size)
+        self.allocs.append((va, size, buf))
+        self.allocs.sort(key=lambda t: t[0])
+        return buf
+
+    def find(self, va):
+        """(Buffer, offset) for a device address inside any allocation (MAX sub-allocates a pool)."""
+        import bisect
+        i = bisect.bisect_right([a[0] for a in self.allocs], va) - 1
+        if i >= 0:
+            base, size, buf = self.allocs[i]
+            if va < base + size:
+                return buf, va - base
+        raise KeyError("device address %#x is not inside any allocation" % va)
+
+    def free(self, va):
+        """Unmap; VRAM is not recycled yet (bump heap) -- MAX allocates one pool."""
+        for i, (base, size, buf) in enumerate(self.allocs):
+            if base == va:
+                self.ch.vmm.unmap(va, size)
+                del self.allocs[i]
+                return
+        raise KeyError("free of unknown address %#x" % va)
 
     def alloc_host(self, size):
         size = nvmmu.align(size, 0x1000)
@@ -154,13 +177,13 @@ class Device:
             faults.dump(self.c)
             raise RuntimeError("submission %r did not complete: %s" % (what, self.ch.status()))
 
-    def launch(self, k, grid, block, params: bytes):
-        """Synchronous launch; returns GPU-measured kernel time in ns."""
+    def launch(self, k, grid, block, params: bytes, smem=0):
+        """Synchronous launch; returns GPU-measured kernel time in ns. smem = dynamic shared bytes."""
         s = self.slot; self.slot = (self.slot + 1) % RING
         qmd_va, cb_va = QMD_VA + s * 0x100, CB_VA + s * 0x1000
         self.c.vram_write(self.cb_pa + s * 0x1000, compute.cbuf0(k, grid, block, params))
         self.c.vram_write(self.qmd_pa + s * 0x100,
-                          compute.build_qmd(k, grid, block, cb_va, 0x1000, prog_off=k["prog_off"]))
+                          compute.build_qmd(k, grid, block, cb_va, 0x1000, prog_off=k["prog_off"], dyn_shared=smem))
         o0, s0 = self._sem(0x7a000000 | s, four_word=True)
         o1, s1 = self._sem(0x7b000000 | s, four_word=True)
         for o in (o0, o1):

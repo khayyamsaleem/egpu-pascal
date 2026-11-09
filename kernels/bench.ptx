@@ -68,3 +68,37 @@ SPIN:
     st.global.u64 [%rd1+24], %rd5;
     ret;
 }
+
+// dst[i] = v for i < n (u32), grid-stride.  Used by the shim server for cuMemsetD32/D16/D8.
+.visible .entry fill32(
+    .param .u64 pdst,
+    .param .u32 pv,
+    .param .u64 pn
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<10>;
+
+    ld.param.u64 %rd1, [pdst];
+    ld.param.u32 %r5, [pv];
+    ld.param.u64 %rd3, [pn];
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mov.u32 %r4, %nctaid.x;
+    mul.wide.u32 %rd4, %r1, %r2;
+    cvt.u64.u32 %rd5, %r3;
+    add.u64 %rd4, %rd4, %rd5;
+    mul.wide.u32 %rd6, %r4, %r2;
+FLOOP:
+    setp.ge.u64 %p1, %rd4, %rd3;
+    @%p1 bra FDONE;
+    shl.b64 %rd7, %rd4, 2;
+    add.s64 %rd8, %rd1, %rd7;
+    st.global.u32 [%rd8], %r5;
+    add.u64 %rd4, %rd4, %rd6;
+    bra FLOOP;
+FDONE:
+    ret;
+}

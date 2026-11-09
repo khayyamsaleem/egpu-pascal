@@ -206,6 +206,14 @@ bands run up to 7000 MHz. nouveau has no Pascal reclock (`ramgp100.c` is init-on
 and the nearest model is Kepler's GDDR5 `gk104_ram_calc_gddr5`. The decisive next
 test needs register writes (needs consent; a mistake costs an enclosure power cycle).
 
-Next: shim **stage 2**. The same entry points are forwarded over TCP to a macOS-side
-server around `nvpascal.Device` (alloc/copy/PTX→cubin/launch), so unmodified Mojo
-programs, then MAX graphs, run on the card.
+**Shim stage 2 works: an unmodified Mojo GPU program runs on the card through
+MAX's normal driver path.** `shim/tests/vadd.mojo`, built with `mojo build
+--target-accelerator=nvidia:61`, goes `DeviceContext` → our `libcuda.so.1`
+(container, `SHIM_MODE=remote`) → TCP → `pascal/shimd.py` (Mac) → `nvpascal` →
+GP102. Result: **4096/4096 correct**. The negative control is the same binary in sim
+mode, where kernels aren't executed: 1/4096. MAX pooled 1843 MiB of the 2 GiB
+reported (mapped in 0.12 s), handed over PTX (JIT'd server-side with ptxas sm_61),
+and the kernel ran in 8–14 µs. See [`shim/README.md`](shim/README.md).
+
+Next: MAX graphs and models. MAX's built-in kernels (matmul etc.) need sm_80+, so
+that's where Pascal fallbacks are required.

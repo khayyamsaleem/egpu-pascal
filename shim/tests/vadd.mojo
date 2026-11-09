@@ -22,3 +22,12 @@ def main() raises:
     with c.map_to_host() as hc:
         print("c0 c1 c2 c3:", hc[0], hc[1], hc[2], hc[3])
         print("c last:", hc[N - 1])
+        var good = 0
+        for i in range(N):
+            if hc[i] == Float32(3 * i):
+                good += 1
+        print("correct:", good, "of", N)
+        if good == N:
+            print("RESULT: PASS")
+        else:
+            print("RESULT: FAIL")

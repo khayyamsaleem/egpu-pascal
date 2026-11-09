@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include "shim_client.h"
 typedef int nvmlReturn_t;
 typedef void *nvmlDevice_t;
 typedef struct { unsigned long long total, free, used; } nvmlMemory_t;
@@ -14,7 +15,18 @@ nvmlReturn_t nvmlDeviceGetCount_v2(unsigned *n) { *n = 1; L("nvmlDeviceGetCount 
 nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned i, nvmlDevice_t *d) { L("nvmlDeviceGetHandleByIndex"); if (i) return 2; *d = &dev_obj; return 0; }
 nvmlReturn_t nvmlDeviceGetName(nvmlDevice_t d, char *n, unsigned len) { L("nvmlDeviceGetName"); snprintf(n, len, "NVIDIA GeForce GTX 1080 Ti"); return 0; }
 nvmlReturn_t nvmlDeviceGetCudaComputeCapability(nvmlDevice_t d, int *ma, int *mi) { *ma = 6; *mi = 1; L("nvmlDeviceGetCudaComputeCapability -> 6.1"); return 0; }
-nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t d, nvmlMemory_t *m) { m->total = 11ull << 30; m->used = 0; m->free = m->total; L("nvmlDeviceGetMemoryInfo"); return 0; }
+nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t d, nvmlMemory_t *m) {
+    m->total = 11ull << 30; m->used = 0; m->free = m->total;
+    if (shim_remote()) {          /* MAX sizes its VRAM pool from this: report the server's view */
+        void *out = NULL; uint32_t n = 0;
+        if (shim_rpc(OP_INFO, NULL, 0, NULL, 0, &out, &n) == 0 && n >= 16) {
+            memcpy(&m->free, out, 8); memcpy(&m->total, (char *)out + 8, 8); m->used = m->total - m->free;
+        }
+        free(out);
+    }
+    char b[128]; snprintf(b, sizeof b, "nvmlDeviceGetMemoryInfo -> free %llu MiB / %llu MiB", m->free >> 20, m->total >> 20); L(b);
+    return 0;
+}
 nvmlReturn_t nvmlSystemGetDriverVersion(char *v, unsigned len) { snprintf(v, len, "580.95.05"); L("nvmlSystemGetDriverVersion -> 580.95.05"); return 0; }
 nvmlReturn_t nvmlDeviceGetPciInfo_v3(nvmlDevice_t d, nvmlPciInfo_t *p) {
     memset(p, 0, sizeof *p); p->bus = 1; p->pciDeviceId = 0x1b0610de; p->pciSubSystemId = 0x66963842;

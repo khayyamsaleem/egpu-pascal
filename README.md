@@ -15,7 +15,7 @@ rung 1  our microcode on a falcon                         DONE
 rung 2  ACR secure boot, FECS/GPCCS running               DONE
 rung 3  MMU v2 + GPFIFO channel + copy engine             DONE
 rung 4  compute dispatch: sm_61 vadd -> host memory        DONE
-rung 5  model inference (MAX)                              next
+rung 5  model inference (MAX)                              in progress: Mojo GPU programs run via the shim
 ```
 
 Boot clocks only for now: 607 MHz SM, 405 MHz memory (~30 GB/s measured).
