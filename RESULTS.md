@@ -1,14 +1,15 @@
 # Results: a GTX 1080 Ti (GP102) running compute kernels from a MacBook Air M1
 
-Compiled 2026-11-08 from sessions 1–6. Every claim below was measured on the
+Compiled 2026-11-08 from sessions 1–6; updated 2026-11-09 (session 7: first LLM). Every claim below was measured on the
 card, with a negative control where one applies. The evidence trail is in
 [`docs/evidence-log.md`](docs/evidence-log.md) and the raw output is in [`logs/`](logs/).
 
 **Bottom line:** the card goes from cold power-on to running ptxas-compiled sm_61
 kernels, with results landing in Mac host memory, entirely from macOS over
-Thunderbolt and with no NVIDIA driver. Rungs 0–4 of the ladder are done. Rung 5
-(model inference, the target being Modular MAX) is next. The card currently runs
-at boot clocks: **607 MHz SM, 405 MHz memory, about 30 GB/s DRAM bandwidth**.
+Thunderbolt and with no NVIDIA driver. **Modular MAX now runs an LLM on it:**
+`max generate` with SmolLM2-135M-Instruct (fp32) produces text identical to
+MAX-on-CPU over 64 greedy tokens, at **6.6 tokens/s** (§9). The card runs at boot
+clocks: **607 MHz SM, 405 MHz memory, about 30 GB/s DRAM bandwidth**.
 
 | | |
 |---|---|
@@ -29,7 +30,8 @@ at boot clocks: **607 MHz SM, 405 MHz memory, about 30 GB/s DRAM bandwidth**.
 | 3 | MMU v2 page tables + a GPFIFO channel; copy engine VRAM↔host memory | **DONE** | `mmu_test.py` (18/18) → `logs/mmu-test.log`, `fifo.py` → `logs/rt3-ce.log` |
 | 4a | GR channel: FECS context switch, PGRAPH executes `PASCAL_COMPUTE_B` methods | **DONE** | `grchan.py` → `logs/s6-grchan-pass.log` |
 | 4 | **Compute dispatch: an sm_61 vector-add writes correct results to host memory** | **DONE** | `compute.py` → `logs/s6-compute.log` (4059/4059, 3/3 runs) |
-| 5 | Model inference (MAX) on the card | not started | plan in §7 |
+| 5a | Unmodified Mojo GPU programs and MAX graphs (elementwise, matmul) run via the libcuda/NVML shim | **DONE** | `shim/tests/vadd.mojo`, `shfl.mojo`, `graph_add.py`, `ops_check.py` (10/10) |
+| 5 | **Model inference: `max generate` SmolLM2-135M-Instruct fp32, GPU text == CPU text (64 greedy tokens)** | **DONE** (first model) | `shim/tests/generate.sh` → `logs/s7-smollm2-*.log` |
 
 Run order on a warm card: `reset_engines.py` → `gr.py` → `compute.py` (or
 `bench.py`). On a cold card, run `devinit.py firmware/gp102_vbios.rom` then `fb.py` first.
@@ -76,7 +78,8 @@ interrupts.
 | DRAM bandwidth, SM kernel | **30.1 GB/s** | 484 GB/s | 16-B ld/st grid-stride copy, 64/256 MiB, 2 grid shapes (`bench.py`) |
 | DRAM bandwidth, copy engines | 24.5 GB/s (1 CE), 29.2 GB/s (2 CEs) | — | `ce_bw.py`, `ce_bw2.py`; CE timestamps, so no TB latency |
 | Host memory → VRAM (CE over TB) | 0.69 GB/s | link ~3 GB/s | 4 MiB, IOMMU 4 KiB pages |
-| Launch + completion latency | ~1 ms end to end (host-observed) | — | `compute.py` |
+| Launch + completion latency | **0.17 ms** (was 1.6 ms) end to end, host-observed | — | `test_modules.py` (5000 launches); §9 |
+| LLM decode, SmolLM2-135M fp32 | **6.6 tokens/s**, TTFT 0.30 s (35-token prompt) | MAX-CPU in the container: 14 tok/s | 343 launches/token, 29 ms of it GPU time |
 
 **What this means for models.** Token generation is bandwidth-bound. At about
 30 GB/s, the card is below the M1 Air's own 68 GB/s. Prompt processing is
@@ -99,6 +102,15 @@ Pascal (§7).
 | 9 | **GR channel: PBDMA0 INTR_0 bit 24 at load; FECS never asked to switch** | **Runlist 0 also carries the GR copy engines CE/CE1 (engines 7/8, PMC bits 6/7), and both were held in reset.** Bit 24 is ENG_RESET (nvgpu's name, cleared by the GPU itself) | take every engine on GR's runlist out of reset (nvgpu enables all CEs at power-on) |
 | 10 | PGRAPH DATA_ERROR INVALID_ENUM on the report semaphore | compute `SET_REPORT_SEMAPHORE_D`: OPERATION 1 isn't valid on `0xc1c0` (RELEASE = 0) | `D = 1 << 28` |
 | 11 | clock probe read 0 ns | ptxas removed the side-effect-free spin loop | spin on `%clock64` itself |
+| 12 | MAX: `Cannot select: intrinsic llvm.nvvm.shfl.sync.idx.i32` (every warp shuffle) | MAX 26.6's GTX 1080 Ti target is `+ptx50,+sm_61`; PTX 5.0 predates `shfl.sync` | `+ptx63` (byte patch in `std.mojoc`, `maxpatch/`) |
+| 13 | MAX matmul: `Cannot select: ...ldmatrix...` | `comptime if use_tensor_core` instantiates the Ampere GEMM even when the runtime shape check skips it | linalg patch: no tensor-core block or cuBLAS fallback when `compute < 7.0` (`maxpatch/patches/0001`) |
+| 14 | Second module loaded into a running server traps: warp ESR `0x9` ILLEGAL_INSTR_ENCODING | the SM instruction cache prefetches past the last kernel it ran; newly written code there is stale | `INVALIDATE_SHADER_CACHES` (0x021c) before the first launch after any code upload |
+| 15 | MAX gather traps: ESR `0x0e` OOR_ADDR at `st l[$r1]` | no local memory: `FRAME_SIZE` lives in the module-level `.nv.info` (by symbol), QMD `LOCAL_MEMORY_LOW_SIZE` and `c[0][0x20]` (stack top) were 0 | per-kernel local size, Mesa-sized TLS (2 KiB/thread), cbuf0 driver ABI (`c[0][0x0/0x4/0x100/0x104]` windows) |
+| 16 | same kernels: assert/printf path reads `c[0x4][...]` | module data (`.nv.global.init`) + constant bank 4 with `R_CUDA_32/64` relocations were never loaded | CUDA-style module loader: data sections, relocations, `vprintf` → `ret` stub, banks bound in the QMD |
+| 17 | softmax: ESR `0x0b` ILLEGAL_INSTR_PARAM | QMD `BARRIER_COUNT = 0` with `bar.sync` in the code (count is `.text` `sh_flags >> 20`) | set it from the cubin; reproduced with 0 vs 1 |
+| 18 | ~65th submission: MMU fault, client HOST, VA `0x204000` | 16 KiB pushbuffer never wrapped | 1 MiB pushbuffer that wraps once the channel has drained |
+| 19 | LLM ran but output only special tokens; sigmoid = 0 | `rcp.rn.f32` reads literals from the **per-kernel** `.nv.constant2.<kernel>`, which wasn't bound | load/bind per-kernel banks; `test_modules.py`: 512/512 bit-exact rcp/div |
+| 20 | `cuMemset` ≥ 4 KiB silently did nothing | `fill32(u64, u32, u64)` params packed with `struct.pack("<QIQ")` (no CUDA alignment): `n` read as 0 | `"<QI4xQ"` |
 
 ## 5. Beliefs that turned out wrong (don't re-learn these)
 
@@ -150,19 +162,25 @@ Sources: [forum: older NVIDIA GPUs](https://forum.modular.com/t/support-for-olde
 [MAX hardware compatibility](https://max.modular.com/gpu/hardware-compatibility/) ·
 [Mojo requirements](https://mojolang.org/docs/requirements/)
 
-## 7. Next phase (rung 5): MAX on this card
+## 7. Next steps
 
-1. **Reclock feasibility (read-only first):** parse the VBIOS perf/memory-clock
-   tables; check whether the MPLL/FBPA registers are host-writable (PLM/priv
-   level) before any write. Any write needs consent, because a mistake costs an
-   enclosure power cycle.
-2. **Driver as a service:** expose `nvpascal.Device` (alloc / copy / load cubin /
-   launch / sync) over a socket with a CUDA-driver-shaped API.
-3. **libcuda + NVML shim** (C, Linux-aarch64): the subset MAX actually calls.
-   Get the call list by running MAX against a logging stub first.
-4. **MAX patches:** sm_61 target entry, `MODULAR_NVPTX_COMPILER_PATH`, then SIMT
-   fallbacks for matmul / attention / quantized matmul.
-5. **First model:** a small Llama (1B) end to end, then an 8B 4-bit model.
+Done this phase: driver as a service (`shimd.py`), the libcuda/NVML shim, the MAX
+patches (`maxpatch/`), and a first model. Next, in order of payoff:
+
+1. **Launch overhead** (decode is 343 launches/token, 29 ms of GPU time, ~150 ms
+   wall): asynchronous launches (no per-launch completion wait; sync only on
+   copies and `cuStreamSynchronize`) plus fire-and-forget launch RPCs. The ceiling
+   at boot clocks is ~30 tok/s for this model.
+2. **Bigger models:** Llama-3.2-1B fp32 (~5 GB, fits in 11 GB; head depth 64, so naive
+   MHA like SmolLM2), then quantized weights (q4_k/q4_0 GPU kernels on sm_61 are
+   untested). Models with head depth 128 (Llama-3-8B, Qwen) route to the tensor-core FA2
+   path and need `flash_attention_hw_supported` gated on `compute >= 8.0`.
+3. **`tanh`** emits `tanh.approx.f32` (sm_75+), so GELU-tanh models (Gemma, GPT-2
+   style) don't compile yet. That needs a std/kernels patch like `maxpatch/0001`.
+4. **Faster SIMT matmul:** prefill uses `matmul_kernel_naive`; the tiled SIMT
+   `matmul_kernel` in the same file is the obvious upgrade.
+5. **Reclock feasibility** (read-only is done, §9): memory at 405 MHz caps decode
+   bandwidth at 30 GB/s. The next test needs register writes, which need consent.
 
 ## 8. Toolchain and reproduction
 
@@ -221,7 +239,7 @@ elementwise kernel. MAX's graph compiler produced the **cubin** itself, through 
 external ptxas. It ran on the GP102 with **max abs error 0 vs numpy**, repeatably (the
 server releases each process's pool on disconnect).
 
-**Current blocker: matmul.** `ops.matmul` fails to compile for sm_61 with `LLVM ERROR:
+**Former blocker: matmul (resolved in session 7, below).** `ops.matmul` failed to compile for sm_61 with `LLVM ERROR:
 Cannot select: intrinsic llvm.nvvm.shfl.sync.idx.i32`. A 3-line warp-shuffle kernel
 (`shim/tests/shfl.mojo`) reproduces it. Root cause, in MAX's source
 (`max/mojo/max/_plugin/cuda/targets.mojo`): the GTX 1080 Ti target hardcodes
@@ -234,3 +252,64 @@ line to `+ptx63,+sm_61` and rebuild the `max` Mojo library (bazel `mojo_library(
 installed Mojo 1.1.0 compiler (the package header's build ID matches the compiler,
 not a source commit). After that, expect sm_80-only paths inside matmul/attention to
 need SIMT fallbacks.
+
+### Session 7 (2026-11-09): matmul fixed, first LLM on the card
+
+**MAX patches** (`maxpatch/`, applied with `docker exec maxlab bash /repo/maxpatch/install.sh`;
+`--revert` restores stock):
+
+1. `std.mojoc`: the GTX 1080 Ti target string `+ptx50,+sm_61` → `+ptx63,+sm_61`. The
+   string sits in the package's zstd payload (string table, same length, no checksum).
+   No bazel rebuild was needed after all; the target table is in `std`, not `max`.
+2. `linalg`: `_matmul_gpu` skips the tensor-core multistage GEMM and cuBLAS fallback
+   when `compute < 7.0`, so SIMT kernels run. Rebuilt with `mojo precompile` from the
+   `max/v26.6.0` tag; an unmodified rebuild matches the shipped package within 0.03%.
+
+Results: `shfl.mojo` (idx + xor butterfly) gets 32/32 lanes right, and 64×64 fp32
+`ops.matmul` has max abs err 0 vs numpy.
+
+**Runtime fixes the first model forced** (blockers 14–20 in §4). Each was reproduced
+on the card before it was fixed. `nvpascal` now loads cubins the way the CUDA driver
+does:
+
+* per-kernel local memory, from the module-level `.nv.info`
+* a 132 MiB TLS area (Mesa's 2 KiB/thread sizing)
+* the sm_6x cbuf0 driver ABI, checked against ptxas output: shared and local
+  generic windows at `c[0][0x0/0x100]` and `c[0][0x4/0x104]`, stack top at `c[0][0x20]`
+* module data (`.nv.global*`, module and per-kernel `.nv.constantN`) with
+  `R_CUDA_32/64` relocations, and `vprintf` → a `ret` stub
+* barrier counts
+* an instruction-cache invalidate after code uploads
+* a wrapping pushbuffer
+
+`pascal/test_modules.py` gates all of it:
+* local and generic pointers, globals through relocated bank 4
+* IEEE `rcp.rn`/`div.rn`: 512/512 bit-exact (bank 2)
+* 5000-launch pushbuffer wrap
+
+**First LLM:** `max generate --model HuggingFaceTB/SmolLM2-135M-Instruct
+--quantization-encoding float32 --devices gpu --top-k 1` (`shim/tests/generate.sh`):
+
+* "The capital of France is" → **"The capital of France is Paris."** on the GPU and
+  on MAX-CPU.
+* A 64-token story prompt gives **identical text** from GPU and CPU.
+* `shim/tests/ops_check.py` passes 10/10, at the model's shapes against numpy:
+  gather, prefill matmuls, decode gemv, RMSNorm, softmax, SiLU·mul and argmax.
+* Kernels MAX runs for this model: naive SIMT matmul (prefill), `gemv_split_k`
+  (decode), naive MHA (`mha_bmm0` / `softmax_temperature` / `mha_bmm1`), fused residual
+  RMSNorm, and top-k sampling.
+
+**Speed:** 1.05 → **6.6 tokens/s**, and TTFT 945 → 300 ms. Profiling one launch
+showed two costs:
+* `time.sleep(0.001)` costs ~1.5 ms on macOS, and the completion wait always slept
+  once. It now spins first.
+* QMD construction `eval`'d each bit-field. It now memoizes the field positions.
+
+Launch latency went 1.6 → 0.17 ms. Per decode token: 343 launches, 29 ms GPU, about
+150 ms wall, so launch overhead is still ~80% of the time (§7 item 1).
+
+Known gaps:
+* `tanh` doesn't compile for sm_61 (`tanh.approx.f32` is sm_75+).
+* An assert firing in a kernel still traps the SM (needs a GR reset), since
+  `vprintf` is a no-op stub.
+* Module space is reclaimed only when every client disconnects.

@@ -62,7 +62,7 @@ class Fifo:
 
 
 class Channel:
-    def __init__(self, fifo, chid, runl, heap, runq=0, gp_entries=512):
+    def __init__(self, fifo, chid, runl, heap, runq=0, gp_entries=512, pb_size=0x100000):
         self.f, self.c, self.chid, self.runl, self.runq = fifo, fifo.c, chid, runl, runq
         c = self.c
         self.heap = heap
@@ -71,7 +71,8 @@ class Channel:
         self.gp_entries = gp_entries
         self.gp_va, self.pb_va = 0x00100000, 0x00200000
         self.gp_pa = self.alloc_map(self.gp_va, gp_entries * 8)
-        self.pb_pa = self.alloc_map(self.pb_va, 0x4000)
+        self.pb_size = pb_size
+        self.pb_pa = self.alloc_map(self.pb_va, pb_size)
         self.gp_put = 0
         self.pb_off = 0
 
@@ -183,6 +184,12 @@ class Channel:
     def push(self, words):
         """Append words to the pushbuffer and queue one GP entry for them."""
         data = struct.pack("<%dI" % len(words), *words)
+        assert len(data) <= self.pb_size, "push of %d bytes exceeds the pushbuffer" % len(data)
+        if self.pb_off + len(data) > self.pb_size:       # wrap: only once the host has drained it
+            gp_get = lambda: self.f.userd_r32(self.chid, U_GPGET)
+            if not self.c.wait(lambda: gp_get() == self.gp_put, 5.0):
+                raise RuntimeError("pushbuffer full and channel not idle: " + self.status())
+            self.pb_off = 0
         va = self.pb_va + self.pb_off
         self.c.vram_write(self.pb_pa + self.pb_off, data)
         self.pb_off += nvmmu.align(len(data), 0x100)

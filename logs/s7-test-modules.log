@@ -1,0 +1,9 @@
+abi_probe: frame 64, lmem 320 bytes/thread, cbanks {4: ('0x30000000', 8)}
+  idx 0: &lbuf 0xff000100 (expect 0xff000100)  &sbuf 0xfe000000  lbuf[idx] 0x1234  gtab[idx] 11  10.7 us  ok
+  idx 2: &lbuf 0xff000100 (expect 0xff000100)  &sbuf 0xfe000000  lbuf[idx] 0x1236  gtab[idx] 33  7.2 us  ok
+  idx 3: &lbuf 0xff000100 (expect 0xff000100)  &sbuf 0xfe000000  lbuf[idx] 0x1237  gtab[idx] 44  7.3 us  ok
+RESULT: PASS
+fdiv_probe: cbanks {4: ('0x30000300', 8), 2: ('0x30000400', 20)}
+  rcp.rn/div.rn: 512 of 512 bit-exact vs numpy  ok
+pushbuffer wrap: 5000 launches in 0.9 s (0.17 ms each), last value 4999  ok
+RESULT: PASS

@@ -50,3 +50,24 @@ alloc/free, H2D/D2H/D2D copies, memset 8/16/32, PTX/cubin modules (server JITs P
 with CUDA 12.4 `ptxas -arch=sm_61`), `cuLaunchKernel`/`cuLaunchKernelEx` (parameter
 layout from the cubin's `KPARAM_INFO`), function attributes. Stubbed (NOT_SUPPORTED):
 CUDA graphs, VMM, multicast, tensor maps, peer access, host-mapped device pointers.
+Run `max generate` with `--no-device-graph-capture` (no CUDA graphs).
+
+Server side (`pascal/shimd.py` → `nvpascal`), modules are loaded like the CUDA driver
+does: per-kernel local memory, module globals and constant banks (module-level and
+per-kernel `.nv.constantN.<k>`) with `R_CUDA_32/64` relocations, a `vprintf` stub,
+barrier counts, and an instruction-cache invalidate after uploads. Module space is
+reclaimed when every client has disconnected. `SHIMD_DUMP=dir` on the server keeps
+every module it loads.
+
+## Tests (container, after `maxpatch/install.sh`)
+
+| test | checks |
+|---|---|
+| `tests/vadd.mojo`, `tests/devinfo.mojo` | a Mojo GPU program end to end; device attributes |
+| `tests/shfl.mojo` | warp shuffles (needs the PTX 6.3 target patch) |
+| `tests/graph_add.py add\|matmul` | MAX graphs: fused elementwise, fp32 matmul vs numpy |
+| `tests/ops_check.py` | 10 ops at SmolLM2 shapes vs numpy |
+| `tests/exp_check.py` | transcendentals; `tanh` still doesn't compile for sm_61 |
+| `tests/generate.sh gpu\|cpu "<prompt>"` | `max generate` SmolLM2-135M fp32, greedy; compare GPU vs CPU |
+
+`tools/ptxas-capture.sh` as `MODULAR_NVPTX_COMPILER_PATH` keeps every PTX MAX compiles.

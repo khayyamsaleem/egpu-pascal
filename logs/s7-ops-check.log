@@ -1,0 +1,19 @@
+gather                     (35, 576)              rel err 0.00e+00  (compile 1.1s, run 0.41s)  ok
+matmul_nt_576              (35, 576)              rel err 0.00e+00  (compile 1.0s, run 0.11s)  ok
+matmul_nt_1536             (35, 1536)             rel err 0.00e+00  (compile 1.0s, run 0.26s)  ok
+matmul_nt_down             (35, 576)              rel err 9.90e-07  (compile 1.0s, run 0.15s)  ok
+gemv_nt_576                (1, 576)               rel err 1.89e-07  (compile 1.0s, run 0.02s)  ok
+gemv_nt_4096               (1, 4096)              rel err 1.76e-07  (compile 1.0s, run 0.16s)  ok
+rms_norm                   (35, 576)              rel err 1.08e-07  (compile 1.0s, run 0.08s)  ok
+softmax                    (9, 35, 35)            rel err 1.53e-05  (compile 1.0s, run 0.04s)  ok
+silu_mul                   (35, 1536)             rel err 1.43e-07  (compile 1.0s, run 0.21s)  ok
+argmax                     (1, 1)                 rel err 0.00e+00  (compile 1.0s, run 0.00s)  ok
+RESULT: PASS
+--- exp_check.py
+exp        rel err 1.8e-07  ok
+sigmoid    rel err 3.7e-09  ok
+silu       rel err 2.4e-08  ok
+tanh       does not compile: Failed to compile the model. Please file an issue, all models should be correct by construction and this error
+sqrt_abs   rel err 0.0e+00  ok
+log1p_abs  rel err 6.2e-09  ok
+RESULT: FAIL (tanh)

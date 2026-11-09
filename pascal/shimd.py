@@ -53,6 +53,8 @@ class Server:
         ks = self.dev.load(os.path.join(ROOT, "kernels", "bench.sm_61.cubin"))
         self.k_fill, self.k_copy = ks["fill32"], ks["bw_copy"]
         self.modules = []
+        self.mark = self.dev.module_mark()   # code/module-data watermark after the builtin kernels
+        self.active = 0                      # open client connections
         self.lock = threading.Lock()          # one GPU, one op at a time (each shim .so has its own socket)
         print("shimd: GP102 up in %.1f s; VRAM limit %.1f GiB" % (time.time() - t0, limit / 2**30), flush=True)
 
@@ -118,7 +120,7 @@ class Server:
             self.dev.c.vram_write(self._pa(va, n), data)
         else:
             self.dev.launch(self.k_fill, (min(28 * 8, (n // 4 + 255) // 256), 1, 1), (256, 1, 1),
-                            struct.pack("<QIQ", va, pat, n // 4))
+                            struct.pack("<QI4xQ", va, pat, n // 4))
         return b""
 
     def module(self, p):
@@ -126,11 +128,14 @@ class Server:
             image = p
         else:
             image = self._ptxas(p.rstrip(b"\0"))
-        with tempfile.NamedTemporaryFile(suffix=".cubin", delete=False) as f:
-            f.write(image); path = f.name
-        ks = self.dev.load(path)
-        os.unlink(path)
         mid = len(self.modules)
+        dump = os.environ.get("SHIMD_DUMP")          # keep every module for offline inspection
+        if dump:
+            os.makedirs(dump, exist_ok=True)
+            if p[:4] != b"\x7fELF":
+                open(os.path.join(dump, "mod%03d.ptx" % mid), "wb").write(p.rstrip(b"\0"))
+            open(os.path.join(dump, "mod%03d.cubin" % mid), "wb").write(image)
+        ks = self.dev.load(image)
         order = list(ks.values())
         self.modules.append(order)
         out = struct.pack("<II", mid, len(order))
@@ -140,7 +145,8 @@ class Server:
             k["params"] = ps
             out += struct.pack("<H", len(name)) + name + struct.pack("<III", k["regs"], k["shared"], len(ps))
             out += b"".join(struct.pack("<HH", o, s) for o, s in ps)
-            print("  module %d: %s (%d regs, %d params)" % (mid, k["name"][:60], k["regs"], len(ps)), flush=True)
+            print("  module %d: %s (%d regs, %d params, frame %d, stack %d, smem %d)"
+                  % (mid, k["name"][:60], k["regs"], len(ps), k["frame"], k["max_stack"], k["shared"]), flush=True)
         return out
 
     def _ptxas(self, ptx):
@@ -174,6 +180,8 @@ class Server:
 
     def _client_thread(self, conn, addr):
         owned = []
+        with self.lock:
+            self.active += 1
         try:
             self._client(conn, owned)
         except (ConnectionError, EOFError):
@@ -188,6 +196,10 @@ class Server:
                     self.dev.data_heap = nvpascal.nvmmu.VramHeap(base=nvpascal.DATA_PA0)
                     self.dev.va_next = nvpascal.DATA_VA0
                     self.used = 0
+                self.active -= 1
+                if not self.active:                      # no process left: drop its modules
+                    self.dev.module_rewind(self.mark)
+                    self.modules = []
             print("shimd: client %s gone (released %d allocations, %d MiB in use)"
                   % (addr, n_owned, self.used >> 20), flush=True)
 

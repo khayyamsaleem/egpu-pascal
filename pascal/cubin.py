@@ -34,6 +34,15 @@ class Cubin:
             o = strtab["off"] + s["name_off"]
             s["name"] = data[o:data.index(b"\0", o)].decode()
         self.sections = {s["name"]: s for s in secs}
+        self.section_list = secs
+        self.symbols = []                                # (name, info, shndx, value, size)
+        symtab = self.sections.get(".symtab")
+        if symtab:
+            st = secs[symtab["link"]]
+            for i in range(symtab["size"] // 24):
+                nm, info, other, shndx, val, size = struct.unpack_from("<IBBHQQ", data, symtab["off"] + i * 24)
+                o = st["off"] + nm
+                self.symbols.append((data[o:data.index(b"\0", o)].decode(), info, shndx, val, size))
 
     @property
     def sm(self):
@@ -45,6 +54,44 @@ class Cubin:
     def sec(self, name):
         s = self.sections.get(name)
         return None if s is None else (self.data[s["off"]:s["off"] + s["size"]] if s["type"] != 8 else bytes(s["size"]))
+
+    def module_info(self):
+        """Module-level .nv.info: {symbol index: {attr name: value}} for <u32 sym, u32 value> records
+        (FRAME_SIZE, MIN_STACK_SIZE, MAX_STACK_SIZE, REGCOUNT ... live here, not in .nv.info.<k>)."""
+        raw = self.sec(".nv.info") or b""
+        out, i = {}, 0
+        while i + 2 <= len(raw):
+            fmt, attr = raw[i], raw[i + 1]; i += 2
+            if fmt == 0x04:
+                (n,) = struct.unpack_from("<H", raw, i); val = raw[i + 2:i + 2 + n]; i += 2 + n
+                if n == 8:
+                    sym, v = struct.unpack("<II", val)
+                    out.setdefault(sym, {})[EIATTR.get(attr, "0x%02x" % attr)] = v
+            elif fmt == 0x03:
+                i += 2
+            elif fmt == 0x02:
+                i += 1
+        return out
+
+    def symbol_index(self, name):
+        for i, s in enumerate(self.symbols):
+            if s[0] == name:
+                return i
+        return None
+
+    def relocations(self):
+        """[(target section name, offset, symbol index, type, addend)] from every SHT_REL/SHT_RELA."""
+        out = []
+        for s in self.section_list:
+            if s["type"] not in (9, 4):                  # SHT_REL, SHT_RELA
+                continue
+            target = self.section_list[s["info"]]["name"]
+            ent = 16 if s["type"] == 9 else 24
+            for j in range(s["size"] // ent):
+                off, info = struct.unpack_from("<QQ", self.data, s["off"] + j * ent)
+                add = struct.unpack_from("<q", self.data, s["off"] + j * ent + 16)[0] if ent == 24 else None
+                out.append((target, off, info >> 32, info & 0xffffffff, add))
+        return out
 
     def info(self, kernel):
         raw = self.sec(".nv.info." + kernel) or b""
@@ -68,10 +115,23 @@ class Cubin:
         cb = dict(info).get("PARAM_CBANK")
         param_off, param_size = (struct.unpack_from("<HH", cb, 4) if cb else (0x140, 0))
         shared = self.sections.get(".nv.shared." + name)
+
+        mod = self.module_info().get(self.symbol_index(name), {})
+
+        def sized(attr):                      # <u32 symbol index, u32 value>: module .nv.info first
+            if attr in mod:
+                return mod[attr]
+            for a, v in info:
+                if a == attr and isinstance(v, bytes) and len(v) >= 8:
+                    return struct.unpack_from("<II", v)[1]
+            return 0
         return dict(name=name, code=self.sec(".text." + name), regs=text["info"] >> 24,
                     cbuf0_size=len(self.sec(".nv.constant0." + name) or b""),
                     param_off=param_off, param_size=param_size,
-                    shared=shared["size"] if shared else 0, info=info)
+                    shared=shared["size"] if shared else 0, info=info,
+                    barriers=(text["flags"] >> 20) & 0x7f,   # named barriers used (bar.sync N)
+                    frame=sized("FRAME_SIZE"), min_stack=sized("MIN_STACK_SIZE"),
+                    max_stack=sized("MAX_STACK_SIZE"))
 
 
 if __name__ == "__main__":

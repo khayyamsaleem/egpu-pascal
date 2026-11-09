@@ -21,8 +21,18 @@ import gr as grmod
 import grctx as grctxmod
 import grchan, cubin as cubinmod, compute, faults, fb
 
-CODE_VA, CODE_SIZE = 0x04000000, 0x100000
-TLS_VA, TLS_PER_SM, TLS_SMS = 0x05000000, 0x20000, 32
+CODE_VA, CODE_SIZE = 0x04000000, 0x2000000  # 32 MiB: MAX loads one module per kernel
+STUB_OFF, CODE_OFF0 = 0x0, 0x100             # code offset 0: shared stubs (vprintf -> ret)
+STUB_SYMBOLS = ("vprintf",)                  # externals resolved to the ret stub
+# Thread-local memory (stack, spills), sized like Mesa nvc0_screen_resize_tls_area(128*16, 0, cstack):
+# per SM = (LMEM_MAX * 32 lanes + CRS per warp) * 64 warps.  Own VRAM range, clear of every heap.
+LMEM_MAX, CRS_PER_WARP, WARPS_PER_SM, TLS_SMS = 0x800, 0x800, 64, 32
+TLS_PER_SM = (LMEM_MAX * 32 + CRS_PER_WARP) * WARPS_PER_SM      # 0x420000 (multiple of 0x8000)
+TLS_VA, TLS_PA = 0x10000000, 0x20000000                         # 132 MiB -> PA 0x28400000
+# Module data: .nv.global / .nv.global.init / .nv.constantN (N > 0) of every loaded cubin.
+MODDATA_VA, MODDATA_PA, MODDATA_SIZE = 0x30000000, 0x30000000, 0x1000000
+# Generic-address windows (compute_state); the cbuf0 driver area tells kernels where they are.
+SHARED_WINDOW, LOCAL_WINDOW = 0xfe000000, 0xff000000
 QMD_VA, CB_VA, RING = 0x06000000, 0x06100000, 64
 SEM_VA = 0x00600000
 DATA_VA0 = 0x100000000                     # buffers live above 4 GiB of VA
@@ -74,7 +84,8 @@ class Device:
             gc = grctxmod.GrCtx(c, self.g, heap)
             self.ch = ch = grchan.GRChannel(self.f, chid=1, gc=gc)
             self.code_pa = ch.alloc_map(CODE_VA, CODE_SIZE)
-            ch.alloc_map(TLS_VA, TLS_PER_SM * TLS_SMS)
+            ch.vmm.map(TLS_VA, TLS_PA, TLS_PER_SM * TLS_SMS, flush=False)
+            ch.vmm.map(MODDATA_VA, MODDATA_PA, MODDATA_SIZE, flush=False)
             self.qmd_pa = ch.alloc_map(QMD_VA, RING * 0x100)
             self.cb_pa = ch.alloc_map(CB_VA, RING * 0x1000)
             self.sem_pa = ch.alloc_map(SEM_VA, 0x1000)
@@ -85,7 +96,12 @@ class Device:
                 sys.stdout.close(); sys.stdout = out
         if not ok:
             raise RuntimeError("GR channel setup failed")
-        self.code_off = 0
+        self.c.vram_write(self.code_pa + STUB_OFF, struct.pack(
+            "<4Q", 0x7ef | 0x7ef << 21 | 0x7ef << 42,             # sched: stall 15, no barriers
+            0xe32000000007000f, 0x50b0000000070f00, 0x50b0000000070f00))   # RET; NOP; NOP
+        self.code_off = CODE_OFF0
+        self.moddata_off = 0
+        self.icache_dirty = True
         self.slot = 0
         self.seq = 0x100
         self.va_next = DATA_VA0
@@ -145,18 +161,88 @@ class Device:
 
     # ------------------------------------------------------------ code
     def load(self, path):
-        cb = cubinmod.Cubin(open(path, "rb").read())
+        """Load every kernel of an sm_61 cubin (path or bytes) the way the CUDA driver does:
+        code into the program region, module data sections (.nv.global, .nv.global.init,
+        .nv.constantN) into module memory, R_CUDA_32/64 relocations applied, and per-kernel
+        local-memory size and constant banks recorded for the launch."""
+        data = open(path, "rb").read() if isinstance(path, str) else path
+        cb = cubinmod.Cubin(data)
         assert cb.sm == 61, "cubin is sm_%d, need sm_61" % cb.sm
-        ks = {}
+        images, sec_va, kbank = {}, {}, {}           # kbank: section -> (bank, owning kernel or None)
+        kernels = set(cb.kernels())
+        for sec in cb.section_list:
+            n = sec["name"]
+            if n.startswith(".nv.constant"):          # .nv.constantN (module) / .nv.constantN.<kernel>
+                num, _, owner = n[len(".nv.constant"):].partition(".")
+                if not num.isdigit() or num == "0" or (owner and owner not in kernels):
+                    continue                          # bank 0 is built per launch (cbuf0)
+                kbank[n] = (int(num), owner or None)
+            if n in (".nv.global", ".nv.global.init") or n in kbank:
+                off = nvmmu.align(self.moddata_off, max(sec["align"], 0x100))
+                assert off + sec["size"] <= MODDATA_SIZE, "module data region full"
+                self.moddata_off = off + sec["size"]
+                sec_va[n] = MODDATA_VA + off
+                images[n] = bytearray(cb.sec(n))
+        ks, text_off = {}, {}
         for name in cb.kernels():
             k = cb.kernel(name)
             off = nvmmu.align(self.code_off, 0x100)
             assert off + len(k["code"]) + 0x100 <= CODE_SIZE, "code region full"
-            self.c.vram_write(self.code_pa + off, k["code"])
-            k["prog_off"] = off
             self.code_off = off + len(k["code"]) + 0x100      # gap: instruction prefetch
+            k["prog_off"] = text_off[".text." + name] = off
+            images[".text." + name] = bytearray(k["code"])
             ks[name] = k
+        for target, roff, si, typ, addend in cb.relocations():
+            sname, _, shndx, sval, _ = cb.symbols[si]
+            if shndx == 0:
+                if sname not in STUB_SYMBOLS:
+                    raise RuntimeError("cubin needs external %r (no driver implementation)" % sname)
+                S = STUB_OFF
+            else:
+                ssec = cb.section_list[shndx]["name"]
+                if ssec in sec_va:
+                    S = sec_va[ssec] + sval
+                elif ssec in text_off:
+                    S = text_off[ssec] + sval
+                else:
+                    raise RuntimeError("relocation against %r in unsupported section %s" % (sname, ssec))
+            img = images.get(target)
+            if img is None:
+                raise RuntimeError("relocation in unsupported section %s (%r)" % (target, sname))
+            fmt = {1: "<I", 2: "<Q"}.get(typ)                  # R_CUDA_32, R_CUDA_64
+            if fmt is None:
+                raise NotImplementedError("relocation type %d (%r in %s)" % (typ, sname, target))
+            A = struct.unpack_from(fmt, img, roff)[0] if addend is None else addend
+            struct.pack_into(fmt, img, roff, (S + A) & (0xffffffff if typ == 1 else (1 << 64) - 1))
+        for n, va in sec_va.items():
+            self.c.vram_write(MODDATA_PA + (va - MODDATA_VA), bytes(images[n]))
+        def banks_for(kernel):                         # module-level banks + the kernel's own
+            b = {}
+            for n, (num, owner) in kbank.items():
+                if owner in (None, kernel):
+                    assert num not in b or owner == kernel, "bank %d defined twice for %s" % (num, kernel)
+                    b[num] = (sec_va[n], len(images[n]))
+            return b
+        for name, k in ks.items():
+            k["code"] = bytes(images[".text." + name])
+            self.c.vram_write(self.code_pa + k["prog_off"], k["code"])
+            need = max(k["frame"], k["min_stack"], k["max_stack"])
+            assert need <= LMEM_MAX - 0x100, "%s needs %d bytes of local memory per thread" % (name, need)
+            k["lmem"] = 0 if not need else nvmmu.align(need, 0x10) + 0x100   # + slack for callees
+            k["cbanks"] = banks_for(name)
+        # The SM instruction cache prefetches past the end of the last kernel it ran, so bytes we
+        # just wrote may be cached stale (zeros) -> warp ESR 0x9 ILLEGAL_INSTR_ENCODING on the next
+        # module's first launch.  Invalidate it before the next launch.
+        self.icache_dirty = True
         return ks
+
+    def module_mark(self):
+        return self.code_off, self.moddata_off
+
+    def module_rewind(self, mark):
+        """Forget every module loaded after `mark` (their code/data space is reused)."""
+        self.code_off, self.moddata_off = mark
+        self.icache_dirty = True
 
     # ------------------------------------------------------------ submission
     def _sem(self, payload, four_word=False):
@@ -172,7 +258,11 @@ class Device:
         self.c.vram_w32(self.sem_pa + off, 0)
         self.ch.push(pb + grchan.fifomod.mthd(grchan.SUBC_CLASS, 0x0110, 0) + done)
         self.ch.kick()
-        if not self.c.wait(lambda: self.c.vram_r32(self.sem_pa + off) == payload, timeout):
+        done = lambda: self.c.vram_r32(self.sem_pa + off) == payload
+        t0 = time.perf_counter()                 # spin first: time.sleep(0.001) costs ~1.5 ms on
+        while not done() and time.perf_counter() - t0 < 0.02:   # macOS, kernels take 10-200 us
+            pass
+        if not done() and not self.c.wait(done, timeout):
             compute.gr_error_dump(self.c)
             faults.dump(self.c)
             raise RuntimeError("submission %r did not complete: %s" % (what, self.ch.status()))
@@ -181,15 +271,22 @@ class Device:
         """Synchronous launch; returns GPU-measured kernel time in ns. smem = dynamic shared bytes."""
         s = self.slot; self.slot = (self.slot + 1) % RING
         qmd_va, cb_va = QMD_VA + s * 0x100, CB_VA + s * 0x1000
-        self.c.vram_write(self.cb_pa + s * 0x1000, compute.cbuf0(k, grid, block, params))
-        self.c.vram_write(self.qmd_pa + s * 0x100,
-                          compute.build_qmd(k, grid, block, cb_va, 0x1000, prog_off=k["prog_off"], dyn_shared=smem))
+        lmem = k.get("lmem", 0)
+        self.c.vram_write(self.cb_pa + s * 0x1000, compute.cbuf0(
+            k, grid, block, params, stack=lmem, windows=(SHARED_WINDOW, LOCAL_WINDOW)))
+        self.c.vram_write(self.qmd_pa + s * 0x100, compute.build_qmd(
+            k, grid, block, cb_va, 0x1000, prog_off=k["prog_off"], dyn_shared=smem,
+            lmem=lmem, cbanks=k.get("cbanks", {})))
         o0, s0 = self._sem(0x7a000000 | s, four_word=True)
         o1, s1 = self._sem(0x7b000000 | s, four_word=True)
         for o in (o0, o1):
             self.c.vram_write(self.sem_pa + o, bytes(16))
         m = compute.m
-        pb = m(0x0110, 0) + s0 + m(0x02b4, qmd_va >> 8) + m(0x02bc, 0x3) + m(0x0110, 0) + s1
+        pb = []
+        if self.icache_dirty:                   # INVALIDATE_SHADER_CACHES: INSTRUCTION | DATA | CONSTANT
+            pb += m(0x021c, (1 << 0) | (1 << 4) | (1 << 12))
+            self.icache_dirty = False
+        pb += m(0x0110, 0) + s0 + m(0x02b4, qmd_va >> 8) + m(0x02bc, 0x3) + m(0x0110, 0) + s1
         self._submit(pb, k["name"])
         w0 = struct.unpack("<IIQ", self.c.vram_read(self.sem_pa + o0, 16))
         w1 = struct.unpack("<IIQ", self.c.vram_read(self.sem_pa + o1, 16))

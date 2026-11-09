@@ -20,7 +20,7 @@ with Graph("g_" + which, input_types=[t, t]) as g:
 sess = InferenceSession(devices=[dev])
 t0 = time.time(); model = sess.load(g); print("compiled+loaded in %.1f s" % (time.time() - t0), flush=True)
 x = np.arange(M * M, dtype=np.float32).reshape(M, M) / 100
-y = np.ones((M, M), dtype=np.float32)
+y = np.random.default_rng(0).standard_normal((M, M)).astype(np.float32)
 out = model.execute(Buffer.from_numpy(x).to(dev), Buffer.from_numpy(y).to(dev))[0].to_numpy()
 ref = x * 2.0 + y if which == "add" else x @ y
 err = float(np.abs(out - ref).max())

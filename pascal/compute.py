@@ -53,12 +53,17 @@ class Qmd:
         self.f = self._load()
         self.bits = 0
 
+    POS = {}                                   # (name, i) -> (lo, width): eval once, not per launch
+
     def set(self, name, value, i=None):
-        hi, lo, idx = self.f[name]
-        assert idx == (i is not None), name
-        env = {"i": i or 0}
-        h, l = eval(hi, {}, env), eval(lo, {}, env)
-        width = h - l + 1
+        pos = self.POS.get((name, i))
+        if pos is None:
+            hi, lo, idx = self.f[name]
+            assert idx == (i is not None), name
+            env = {"i": i or 0}
+            h, l = eval(hi, {}, env), eval(lo, {}, env)
+            pos = self.POS[(name, i)] = (l, h - l + 1)
+        l, width = pos
         assert 0 <= value < (1 << width), "%s=%#x does not fit %d bits" % (name, value, width)
         self.bits &= ~(((1 << width) - 1) << l)
         self.bits |= value << l
@@ -97,7 +102,8 @@ def compute_state(tls_va, per_sm, code_va):
     return pb
 
 
-def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800, dyn_shared=0):
+def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800, dyn_shared=0, lmem=0, cbanks=None):
+    """lmem = per-thread local memory bytes (stack/spills); cbanks = {bank: (va, size)} beyond bank 0."""
     q = Qmd()
     q.set("SM_GLOBAL_CACHING_ENABLE", 1)
     q.set("RELEASE_MEMBAR_TYPE", 1)            # FE_SYSMEMBAR
@@ -112,22 +118,33 @@ def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800, dyn_share
     q.set("CTA_THREAD_DIMENSION0", block[0]); q.set("CTA_THREAD_DIMENSION1", block[1])
     q.set("CTA_THREAD_DIMENSION2", block[2])
     q.set("SHARED_MEMORY_SIZE", nvmmu.align(k["shared"] + dyn_shared, 0x100))
-    q.set("SHADER_LOCAL_MEMORY_LOW_SIZE", 0)
+    q.set("SHADER_LOCAL_MEMORY_LOW_SIZE", lmem)
     q.set("SHADER_LOCAL_MEMORY_HIGH_SIZE", 0)
     q.set("SHADER_LOCAL_MEMORY_CRS_SIZE", crs)
     q.set("REGISTER_COUNT", k["regs"])
-    q.set("BARRIER_COUNT", 0)
+    q.set("BARRIER_COUNT", k.get("barriers", 0))  # 0 with bar.sync in the code -> ESR 0xb ILLEGAL_INSTR_PARAM
     q.set("CONSTANT_BUFFER_ADDR_LOWER", cb0_va & 0xffffffff, 0)
     q.set("CONSTANT_BUFFER_ADDR_UPPER", cb0_va >> 32, 0)
     q.set("CONSTANT_BUFFER_SIZE_SHIFTED4", cb0_size >> 4, 0)
     q.set("CONSTANT_BUFFER_VALID", 1, 0)
+    for i, (va, size) in sorted((cbanks or {}).items()):
+        assert 0 < i < 8 and va % 0x100 == 0
+        q.set("CONSTANT_BUFFER_ADDR_LOWER", va & 0xffffffff, i)
+        q.set("CONSTANT_BUFFER_ADDR_UPPER", va >> 32, i)
+        q.set("CONSTANT_BUFFER_SIZE_SHIFTED4", nvmmu.align(max(size, 0x10), 0x10) >> 4, i)
+        q.set("CONSTANT_BUFFER_VALID", 1, i)
     if "--qmd-version" in sys.argv:
         q.set("QMD_VERSION", 1); q.set("QMD_MAJOR_VERSION", 2)
     return q.bytes()
 
 
-def cbuf0(k, grid, block, params: bytes, stack=0):
-    img = bytearray(max(k["cbuf0_size"], k["param_off"] + len(params)))
+def cbuf0(k, grid, block, params: bytes, stack=0, windows=(0xfe000000, 0xff000000)):
+    """Driver area of constant bank 0 (sm_6x ABI, checked against ptxas output):
+    c[0][0x0]/[0x100] shared window lo/hi, [0x4]/[0x104] local window lo/hi (generic pointers),
+    [0x8] blockDim, [0x14] gridDim, [0x20] initial stack pointer (= local bytes per thread)."""
+    img = bytearray(max(k["cbuf0_size"], k["param_off"] + len(params), 0x108))
+    struct.pack_into("<II", img, 0x0, windows[0], windows[1])
+    struct.pack_into("<II", img, 0x100, 0, 0)
     struct.pack_into("<3I", img, 0x8, *block)
     struct.pack_into("<3I", img, 0x14, *grid)
     struct.pack_into("<I", img, 0x20, stack)

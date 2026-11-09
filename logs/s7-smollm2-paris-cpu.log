@@ -1,0 +1,39 @@
+08:17:36.673 INFO: Metrics initialized.
+08:17:36.674 INFO: Tracing initialized.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+08:17:38.323 INFO: Defaulting structured output backend to the global default 'xgrammar' (architecture LlamaForCausalLM declares no default). Override with --structured-output-backend.
+08:17:38.324 INFO: devices: cpu[-1]
+08:17:38.364 INFO: cache_memory: 16.88 MiB
+08:17:38.719 INFO: All weight files for HuggingFaceTB/SmolLM2-135M-Instruct found in local HF cache.
+08:17:46.131 INFO: Building, compiling, and initializing model...
+08:17:46.566 INFO: Building model graph took 0.4 seconds
+08:18:12.917 INFO: Compiling model took 26.2 seconds
+08:18:12.917 INFO: Initializing model took 0.1 seconds
+08:18:12.918 INFO: Building, compiling, and initializing model took 26.8 seconds
+08:18:12.922 INFO: Building, compiling, and initializing sampler...
+08:18:13.278 INFO: Building sampler graph took 0.4 seconds
+08:18:20.943 INFO: Compiling sampler took 7.7 seconds
+08:18:20.943 INFO: Initializing sampler took 0.0 seconds
+08:18:20.943 INFO: Building, compiling, and initializing sampler took 8.0 seconds
+08:18:20.944 INFO: 
+08:18:20.944 INFO: ============================================================
+08:18:20.944 INFO: Pipeline Configuration (use --pretty-print-config to print full config)
+08:18:20.945 INFO: ============================================================
+08:18:20.945 INFO:     architecture         : LlamaForCausalLM
+08:18:20.945 INFO:     pipeline             : TextGenerationPipeline
+08:18:20.945 INFO:     model                : HuggingFaceTB/SmolLM2-135M-Instruct
+08:18:20.945 INFO:     max_seq_len          : 256
+08:18:20.945 INFO:     device_graph_capture : False
+08:18:20.945 INFO: 
+08:18:20.945 INFO: max_batch_size: 1
+08:18:20.947 INFO: Beginning text generation
+The capital of France is Paris.
+Prompt size: 35
+Output size: 8
+Startup time: 3.252744674682617 ms
+Time to first token: 214.9066925048828 ms
+Prompt eval throughput (context-encoding): 162.8613776148678 tokens per second
+Time per Output Token: 71.54253550938198 ms
+Eval throughput (token-generation): 13.977698621945843 tokens per second
+Total Latency: 715.7044410705566 ms
+Total Throughput: 1.3972248076373421 req/s

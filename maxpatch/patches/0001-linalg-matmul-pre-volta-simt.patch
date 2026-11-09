@@ -1,0 +1,34 @@
+diff --git a/max/kernels/src/linalg/matmul/gpu/__init__.mojo b/max/kernels/src/linalg/matmul/gpu/__init__.mojo
+index 5acd0ee..4e2df14 100644
+--- a/max/kernels/src/linalg/matmul/gpu/__init__.mojo
++++ b/max/kernels/src/linalg/matmul/gpu/__init__.mojo
+@@ -510,6 +510,13 @@ def _matmul_gpu[
+         or (has_nvidia_gpu_accelerator() and _has_blackwell_tcgen05())
+     ), "use_tf32=False is only implemented for the SM100 matmul dispatch"
+ 
++    # Pre-Volta NVIDIA (Pascal sm_6x, Maxwell sm_5x) has no tensor cores and no
++    # ldmatrix/mma.sync/cp.async: keep every tensor-core kernel out of the
++    # elaborated module and use the SIMT kernels below. [egpu-pascal]
++    comptime nvidia_no_tensor_cores = (
++        has_nvidia_gpu_accelerator() and ctx.default_device_info.compute < 7.0
++    )
++
+     var shape = GemmShape.get[transpose_b=False](c, a, b)
+     var m = shape.M
+     var n = shape.N
+@@ -742,6 +749,7 @@ def _matmul_gpu[
+         and not has_apple_gpu_accelerator()
+         and use_tensor_core
+         and has_static_NK
++        and not nvidia_no_tensor_cores
+     ):
+         if multi_gemm_cond:
+ 
+@@ -1384,6 +1392,7 @@ def _matmul_gpu[
+         and c_type in vendor_blas_fallback_dtypes
+         and not has_apple_gpu_accelerator()
+         and not has_amd_rdna_gpu_accelerator()
++        and not nvidia_no_tensor_cores  # [egpu-pascal] no cuBLAS behind the shim
+         # to disable vendor fallback, run export MODULAR_DISABLE_VENDOR_FALLBACK=1 in the environment
+         and not _vendor_blas_fallback_disabled()
+     ):

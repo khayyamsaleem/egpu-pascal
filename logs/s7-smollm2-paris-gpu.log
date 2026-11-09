@@ -1,0 +1,45 @@
+08:24:51.467 INFO: Metrics initialized.
+08:24:51.467 INFO: Tracing initialized.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+08:24:53.188 INFO: Defaulting structured output backend to the global default 'xgrammar' (architecture LlamaForCausalLM declares no default). Override with --structured-output-backend.
+08:24:53.189 INFO: Automatically enabling overlap scheduling for LlamaForCausalLM. You can manually disable this by setting --no-enable-overlap-scheduler --force.
+08:24:53.189 INFO: devices: gpu[0]
+08:24:53.224 INFO: cache_memory: 16.88 MiB
+08:24:53.584 INFO: All weight files for HuggingFaceTB/SmolLM2-135M-Instruct found in local HF cache.
+08:25:01.514 INFO: Building, compiling, and initializing model...
+08:25:01.945 INFO: Building model graph took 0.4 seconds
+08:25:20.890 INFO: Compiling model took 11.4 seconds
+08:25:20.890 INFO: Initializing model took 7.5 seconds
+08:25:20.890 INFO: Building, compiling, and initializing model took 19.4 seconds
+08:25:21.010 INFO: Building, compiling, and initializing sampler...
+08:25:21.312 INFO: Building sampler graph took 0.3 seconds
+08:25:25.278 INFO: Compiling sampler took 4.0 seconds
+08:25:25.278 INFO: Initializing sampler took 0.0 seconds
+08:25:25.278 INFO: Building, compiling, and initializing sampler took 4.3 seconds
+08:25:25.278 INFO: Building, compiling, and initializing realize_future_token...
+08:25:25.581 INFO: Building realize_future_token graph took 0.3 seconds
+08:25:29.641 INFO: Compiling realize_future_token took 4.1 seconds
+08:25:29.641 INFO: Initializing realize_future_token took 0.0 seconds
+08:25:29.641 INFO: Building, compiling, and initializing realize_future_token took 4.4 seconds
+08:25:29.641 INFO: 
+08:25:29.641 INFO: ============================================================
+08:25:29.642 INFO: Pipeline Configuration (use --pretty-print-config to print full config)
+08:25:29.642 INFO: ============================================================
+08:25:29.642 INFO:     architecture         : LlamaForCausalLM
+08:25:29.642 INFO:     pipeline             : OverlapTextGenerationPipeline
+08:25:29.642 INFO:     model                : HuggingFaceTB/SmolLM2-135M-Instruct
+08:25:29.642 INFO:     max_seq_len          : 256
+08:25:29.642 INFO:     device_graph_capture : False
+08:25:29.642 INFO: 
+08:25:29.642 INFO: max_batch_size: 1
+08:25:29.642 INFO: Beginning text generation
+The capital of France is Paris.
+Prompt size: 35
+Output size: 9
+Startup time: 0.400543212890625 ms
+Time to first token: 959.475040435791 ms
+Prompt eval throughput (context-encoding): 36.47828085668919 tokens per second
+Time per Output Token: 966.6142761707306 ms
+Eval throughput (token-generation): 1.0345388275885268 tokens per second
+Total Latency: 8692.389249801636 ms
+Total Throughput: 0.11504316836971153 req/s

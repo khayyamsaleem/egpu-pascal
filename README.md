@@ -4,9 +4,11 @@ A from-scratch, user-space bring-up of an **NVIDIA GTX 1080 Ti (GP102, Pascal)**
 Thunderbolt enclosure on an **Apple Silicon MacBook Air**. It needs no NVIDIA driver and
 runs over tinygrad's TinyGPU DriverKit transport.
 
-**Status (2026-11-08):** the card POSTs from macOS, secure-boots its graphics firmware,
+**Status (2026-11-09):** the card POSTs from macOS, secure-boots its graphics firmware,
 and runs **ptxas-compiled sm_61 CUDA kernels** dispatched through our own channel/QMD code.
-Results land in Mac host memory. Next phase: model inference through **Modular MAX**.
+**Modular MAX runs an LLM on it**: `max generate` with SmolLM2-135M-Instruct (fp32)
+gives text identical to MAX-on-CPU at 6.6 tokens/s, through a libcuda/NVML shim and
+two small local MAX patches ([`maxpatch/`](maxpatch/)).
 Full results: **[RESULTS.md](RESULTS.md)**.
 
 ```
@@ -15,7 +17,7 @@ rung 1  our microcode on a falcon                         DONE
 rung 2  ACR secure boot, FECS/GPCCS running               DONE
 rung 3  MMU v2 + GPFIFO channel + copy engine             DONE
 rung 4  compute dispatch: sm_61 vadd -> host memory        DONE
-rung 5  model inference (MAX)                              in progress: Mojo GPU programs run via the shim
+rung 5  model inference (MAX): SmolLM2-135M generates     DONE (first model; speed work next)
 ```
 
 Boot clocks only for now: 607 MHz SM, 405 MHz memory (~30 GB/s measured).
@@ -47,7 +49,20 @@ $PY pascal/bench.py              # SM clock + DRAM bandwidth via the runtime
 ```
 
 Other gates: `pascal/mmu.py --selftest` (offline), `pascal/mmu_test.py` (RT-2, 18/18),
-`pascal/fifo.py` (RT-3 copy engine), `pascal/grchan.py` (GR channel), `pascal/ce_bw.py`.
+`pascal/fifo.py` (RT-3 copy engine), `pascal/grchan.py` (GR channel), `pascal/ce_bw.py`,
+`pascal/test_modules.py` (CUDA-module ABI: local memory, globals, constant banks, 5000-launch wrap).
+
+## Run an LLM with MAX
+
+```sh
+# Mac: card up (above), then the driver server
+$PY pascal/shimd.py --vram-limit-gib 4
+# Linux container with modular==26.6.0 and this repo at /repo (see shim/README.md)
+git clone --depth 1 --branch max/v26.6.0 https://github.com/modular/modular.git upstream/modular
+docker exec maxlab bash /repo/maxpatch/install.sh            # sm_61 target + SIMT matmul
+docker exec maxlab bash /repo/shim/tests/generate.sh gpu "The capital of France is"
+#   -> The capital of France is Paris.
+```
 
 ## Using the runtime
 
@@ -66,6 +81,8 @@ ns = dev.launch(k, (32, 1, 1), (128, 1, 1), struct.pack("<QQQI", a.va, b.va, c.v
 |---|---|
 | `pascal/` | the driver: `card` (BAR0/PRAMIN), `devinit`/`vbios`, `fb`, `mmu`, `acr`/`acr_unload`, `sec2_rtos`, `gr`/`gr_ctxctl`/`grctx`, `fifo`, `grchan`, `compute`, **`nvpascal`** (runtime), `cubin`, `bench`, `fecs_snap`, probes, recovery |
 | `kernels/` | PTX sources, built sm_61 cubins, `Dockerfile` + `build.sh` |
+| `shim/` | `libcuda.so.1` + `libnvidia-ml.so.1` replacements for MAX (Linux container) and their tests |
+| `maxpatch/` | the local MAX 26.6.0 patches for sm_61 and their installer |
 | `tools/nvclass`, `tools/nvkm`, `tools/mesa` | vendored references (MIT): NVIDIA class/QMD headers, nouveau, Mesa |
 | `docs/` | the chronological evidence trail and per-session handoffs |
 | `logs/` | hardware output cited by RESULTS.md and the docs |
