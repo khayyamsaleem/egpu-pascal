@@ -32,6 +32,7 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 PTXAS_IMAGE = "egpu-ptxas:12.4"
 CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_OUT_OF_MEMORY, CUDA_ERROR_INVALID_PTX = 1, 2, 218
 CUDA_ERROR_LAUNCH_FAILED, CUDA_ERROR_NOT_SUPPORTED = 719, 801
+TRACE = bool(os.environ.get("SHIMD_TRACE"))       # log copies and kernel pointer params
 
 
 def kparams(k):
@@ -92,6 +93,8 @@ class Server:
     def htod(self, p):
         (va,) = struct.unpack_from("<Q", p)
         data = p[8:]
+        if TRACE:
+            print("T htod %x +%d" % (va, len(data)), flush=True)
         self.dev.c.vram_write(self._pa(va, len(data)), data)
         return b""
 
@@ -101,6 +104,8 @@ class Server:
 
     def dtod(self, p):
         dst, src, n = struct.unpack("<QQQ", p)
+        if TRACE:
+            print("T dtod %x <- %x +%d" % (dst, src, n), flush=True)
         self._pa(dst, n); self._pa(src, n)
         if (dst | src | n) % 16 == 0 and n:
             self.dev.launch(self.k_copy, (min(28 * 8, (n // 16 + 255) // 256), 1, 1), (256, 1, 1),
@@ -145,8 +150,9 @@ class Server:
             k["params"] = ps
             out += struct.pack("<H", len(name)) + name + struct.pack("<III", k["regs"], k["shared"], len(ps))
             out += b"".join(struct.pack("<HH", o, s) for o, s in ps)
-            print("  module %d: %s (%d regs, %d params, frame %d, stack %d, smem %d)"
-                  % (mid, k["name"][:60], k["regs"], len(ps), k["frame"], k["max_stack"], k["shared"]), flush=True)
+            print("  module %d: %s (%d regs, %d params / %d bytes, frame %d, stack %d, smem %d)"
+                  % (mid, k["name"][:60], k["regs"], len(ps), max([o + n for o, n in ps] or [0]),
+                     k["frame"], k["max_stack"], k["shared"]), flush=True)
         return out
 
     def _ptxas(self, ptx):
@@ -163,6 +169,11 @@ class Server:
         mid, fi, gx, gy, gz, bx, by, bz, smem, plen = struct.unpack_from("<10I", p)
         params = p[40:40 + plen]
         k = self.modules[mid][fi]
+        if TRACE:                                   # device pointers among the 8-byte params
+            ptrs = sorted({v for (v,) in struct.iter_unpack("<Q", params[:len(params) // 8 * 8])
+                           if nvpascal.DATA_VA0 <= v < nvpascal.DATA_VA0 + (16 << 30)})
+            print("T launch %s grid %d,%d,%d ptrs %s" % (k["name"][:48], gx, gy, gz,
+                  " ".join("%x" % v for v in ptrs)), flush=True)
         ns = self.dev.launch(k, (gx, gy, gz), (bx, by, bz), params, smem=smem)
         return struct.pack("<Q", ns)
 

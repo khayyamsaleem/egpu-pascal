@@ -35,6 +35,10 @@ MODDATA_VA, MODDATA_PA, MODDATA_SIZE = 0x30000000, 0x30000000, 0x1000000
 # Generic-address windows (compute_state); the cbuf0 driver area tells kernels where they are.
 SHARED_WINDOW, LOCAL_WINDOW = 0xfe000000, 0xff000000
 QMD_VA, CB_VA, RING = 0x06000000, 0x06100000, 64
+# Constant bank 0 per launch: driver area (0x140) + kernel params. sm_6x allows up to 0x1100 bytes of
+# params, so a 4 KiB slot was too small: MAX's multi-output fused kernels (one output pointer per layer)
+# reach ~4 KiB, and the params past 0x1000 spilled into the next slot / read as 0 in the kernel.
+CB_SLOT = 0x2000
 SEM_VA = 0x00600000
 DATA_VA0 = 0x100000000                     # buffers live above 4 GiB of VA
 DATA_PA0 = 0x40000000                      # and above 1 GiB of VRAM (clear of WPR2 @ 0x18040000)
@@ -88,7 +92,7 @@ class Device:
             ch.vmm.map(TLS_VA, TLS_PA, TLS_PER_SM * TLS_SMS, flush=False)
             ch.vmm.map(MODDATA_VA, MODDATA_PA, MODDATA_SIZE, flush=False)
             self.qmd_pa = ch.alloc_map(QMD_VA, RING * 0x100)
-            self.cb_pa = ch.alloc_map(CB_VA, RING * 0x1000)
+            self.cb_pa = ch.alloc_map(CB_VA, RING * CB_SLOT)
             self.sem_pa = ch.alloc_map(SEM_VA, 0x1000)
             ch.vmm.flush()
             ok = ch.setup()
@@ -271,12 +275,15 @@ class Device:
     def launch(self, k, grid, block, params: bytes, smem=0):
         """Synchronous launch; returns GPU-measured kernel time in ns. smem = dynamic shared bytes."""
         s = self.slot; self.slot = (self.slot + 1) % RING
-        qmd_va, cb_va = QMD_VA + s * 0x100, CB_VA + s * 0x1000
+        qmd_va, cb_va = QMD_VA + s * 0x100, CB_VA + s * CB_SLOT
         lmem = k.get("lmem", 0)
-        self.c.vram_write(self.cb_pa + s * 0x1000, compute.cbuf0(
-            k, grid, block, params, stack=lmem, windows=(SHARED_WINDOW, LOCAL_WINDOW)))
+        cb = compute.cbuf0(k, grid, block, params, stack=lmem, windows=(SHARED_WINDOW, LOCAL_WINDOW))
+        if len(cb) > CB_SLOT:
+            raise ValueError("%s: constant bank 0 needs %#x bytes (params %#x), slot is %#x"
+                             % (k["name"], len(cb), len(params), CB_SLOT))
+        self.c.vram_write(self.cb_pa + s * CB_SLOT, cb)
         self.c.vram_write(self.qmd_pa + s * 0x100, compute.build_qmd(
-            k, grid, block, cb_va, 0x1000, prog_off=k["prog_off"], dyn_shared=smem,
+            k, grid, block, cb_va, nvmmu.align(len(cb), 0x100), prog_off=k["prog_off"], dyn_shared=smem,
             lmem=lmem, cbanks=k.get("cbanks", {})))
         o0, s0 = self._sem(0x7a000000 | s, four_word=True)
         o1, s1 = self._sem(0x7b000000 | s, four_word=True)
