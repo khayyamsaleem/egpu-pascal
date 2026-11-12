@@ -14,7 +14,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-enum { OP_INFO = 1, OP_ALLOC, OP_FREE, OP_HTOD, OP_DTOH, OP_DTOD, OP_MEMSET, OP_MODULE, OP_LAUNCH };
+enum { OP_INFO = 1, OP_ALLOC, OP_FREE, OP_HTOD, OP_DTOH, OP_DTOD, OP_MEMSET, OP_MODULE, OP_LAUNCH, OP_SYNC };
+#define OP_NOREPLY 0x80000000u   /* queued in order on the server; errors come back on the next reply */
 
 static int shim_fd = -1;
 static pthread_mutex_t shim_rpc_lk = PTHREAD_MUTEX_INITIALIZER;
@@ -73,6 +74,16 @@ static int shim_rpc(uint32_t op, const void *a, uint32_t na, const void *b, uint
     if (nout) *nout = n;
     status = rh[0];
 done:
+    pthread_mutex_unlock(&shim_rpc_lk);
+    return status;
+}
+/* Fire-and-forget: the server queues the op on the GPU (in order) and sends nothing back. */
+static int shim_send(uint32_t op, const void *a, uint32_t na, const void *b, uint32_t nb) {
+    int status = 999;
+    uint32_t hdr[2] = {op | OP_NOREPLY, na + nb};
+    pthread_mutex_lock(&shim_rpc_lk);
+    if (!shim_connect() && !shim_io(1, hdr, 8) && !(na && shim_io(1, (void *)a, na)) && !(nb && shim_io(1, (void *)b, nb)))
+        status = 0;
     pthread_mutex_unlock(&shim_rpc_lk);
     return status;
 }

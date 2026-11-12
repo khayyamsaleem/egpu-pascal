@@ -1,0 +1,9 @@
+# CUDA 12.8 nvcc for sm_61 on linux-aarch64 (sbsa); 12.x is the last series that compiles Pascal.
+FROM ubuntu:22.04
+ENV PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && \
+  wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/sbsa/cuda-keyring_1.1-1_all.deb && \
+  dpkg -i cuda-keyring_1.1-1_all.deb && \
+  apt-get update && apt-get install -y --no-install-recommends cuda-nvcc-12-8 cuda-nvdisasm-12-8 cuda-cuobjdump-12-8 && \
+  rm -rf /var/lib/apt/lists/*
+WORKDIR /k

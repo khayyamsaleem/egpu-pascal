@@ -119,3 +119,5 @@ cuTensorMapEncodeTiled
 cuDeviceGetUuid
 cuDeviceGetUuid_v2
 cuGraphAddDependencies_v2
+cuCtxSynchronize
+cuStreamQuery

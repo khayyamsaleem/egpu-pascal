@@ -138,6 +138,27 @@ def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800, dyn_share
     return q.bytes()
 
 
+_QMD_CACHE = {}
+
+
+def qmd_fast(k, grid, block, cb0_va, cb0_size, dyn_shared=0):
+    """build_qmd for the per-launch path: everything but constant bank 0's address is cached per
+    (kernel, grid, block, cb0 size, dynamic shared); the address is OR'd into the template."""
+    key = (id(k), grid, block, cb0_size, dyn_shared)
+    t = _QMD_CACHE.get(key)
+    if t is None:
+        if len(_QMD_CACHE) > 4096:
+            _QMD_CACHE.clear()
+        q = Qmd()
+        build = build_qmd(k, grid, block, 0, cb0_size, prog_off=k["prog_off"], dyn_shared=dyn_shared,
+                          lmem=k.get("lmem", 0), cbanks=k.get("cbanks", {}))
+        q.set("CONSTANT_BUFFER_ADDR_LOWER", 0, 0); q.set("CONSTANT_BUFFER_ADDR_UPPER", 0, 0)
+        lo, hi = Qmd.POS[("CONSTANT_BUFFER_ADDR_LOWER", 0)][0], Qmd.POS[("CONSTANT_BUFFER_ADDR_UPPER", 0)][0]
+        t = _QMD_CACHE[key] = (int.from_bytes(build, "little"), lo, hi, k)   # keep k alive (id key)
+    bits, lo, hi, _ = t
+    return (bits | ((cb0_va & 0xffffffff) << lo) | ((cb0_va >> 32) << hi)).to_bytes(256, "little")
+
+
 def cbuf0(k, grid, block, params: bytes, stack=0, windows=(0xfe000000, 0xff000000)):
     """Driver area of constant bank 0 (sm_6x ABI, checked against ptxas output):
     c[0][0x0]/[0x100] shared window lo/hi, [0x4]/[0x104] local window lo/hi (generic pointers),

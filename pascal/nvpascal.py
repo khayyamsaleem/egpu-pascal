@@ -4,11 +4,15 @@ One GR channel (grchan.GRChannel) with persistent PASCAL_COMPUTE_B state, and:
   Device.alloc(size)        VRAM buffer, mapped into the channel VMM  -> Buffer(va, pa, size)
   Device.alloc_host(size)   host memory through the IOMMU (sys_coh)   -> HostBuffer(va, mem, size)
   Device.load(cubin)        every kernel of a ptxas sm_61 cubin into the code region
-  Device.launch(k, grid, block, params)   QMD v02_01 + cbuf0, PCAS, WFI; returns GPU ns
-                            (from four-word report-semaphore timestamps around the launch)
+  Device.launch_async(k, grid, block, params)   queue a launch; returns its sequence number
+  Device.htod / dtoh / copy_async / fill_async  stream-ordered copies (GPU kernels, host staging)
+  Device.drain()            wait for everything queued;  Device.launch(...) = timed + synchronous
 
-This is the API a libcuda shim needs underneath (cuMemAlloc / cuMemcpy / cuModuleLoadData /
-cuLaunchKernel / cuStreamSynchronize).  Launches are synchronous for now.
+Launches are asynchronous and in order (one channel, WAIT_FOR_IDLE after each kernel). Everything
+a launch needs lives in one GPU-mapped host buffer (the "host ring"): QMD, constant bank 0, the
+pushbuffer segment, the GPFIFO and a completion counter the GPU releases after every launch. So a
+launch costs one doorbell write over the transport, and waiting is reading host memory -- not
+PRAMIN (70 MB/s write, 1 MB/s read) and 18 us BAR read round trips per launch.
 
 Prerequisite on a warm card: pascal/reset_engines.py + pascal/gr.py.
 """
@@ -34,12 +38,25 @@ TLS_VA, TLS_PA = 0x10000000, 0x20000000                         # 132 MiB -> PA 
 MODDATA_VA, MODDATA_PA, MODDATA_SIZE = 0x30000000, 0x30000000, 0x1000000
 # Generic-address windows (compute_state); the cbuf0 driver area tells kernels where they are.
 SHARED_WINDOW, LOCAL_WINDOW = 0xfe000000, 0xff000000
-QMD_VA, CB_VA, RING = 0x06000000, 0x06100000, 64
 # Constant bank 0 per launch: driver area (0x140) + kernel params. sm_6x allows up to 0x1100 bytes of
 # params, so a 4 KiB slot was too small: MAX's multi-output fused kernels (one output pointer per layer)
 # reach ~4 KiB, and the params past 0x1000 spilled into the next slot / read as 0 in the kernel.
 CB_SLOT = 0x2000
 SEM_VA = 0x00600000
+# Host ring (GPU-mapped host memory, sys_coh): see the module docstring.
+HOST_VA, HOST_SIZE, NSLOT = 0x08000000, 0x3000000, 256
+H_SEM, H_GPFIFO, H_PROF, H_FLUSH = 0x0, 0x1000, 0x2000, 0x4000
+H_QMD, H_PB, H_CB, H_STAGE = 0x10000, 0x100000, 0x400000, 0x800000
+PB_SLOT, STAGE_CHUNK = 0x2400, 0x400000                    # pushbuffer per slot: inline cbuf0 + QMD; 10 x 4 MiB staging
+# Where a launch's QMD and constant bank 0 live (NVPASCAL_UPLOAD):
+#   "host"   GPU-mapped host memory, written by the CPU (fetched over Thunderbolt by SKED / the SMs)
+#   "cb"     cbuf0 uploaded to VRAM by the GPU from the pushbuffer (LOAD_INLINE_DATA), QMD in host
+#   "all"    both uploaded inline to VRAM (default)
+UPLOAD = os.environ.get("NVPASCAL_UPLOAD", "all")
+VQMD_VA, VCB_VA = 0x06000000, 0x06100000                   # VRAM rings for the inline uploads
+NSTAGE = (HOST_SIZE - H_STAGE) // STAGE_CHUNK
+assert H_PB + NSLOT * PB_SLOT <= H_CB and H_CB + NSLOT * CB_SLOT <= H_STAGE
+PROF = bool(os.environ.get("NVPASCAL_PROF"))                 # per-kernel GPU time (two timestamps/launch)
 DATA_VA0 = 0x100000000                     # buffers live above 4 GiB of VA
 DATA_PA0 = 0x40000000                      # and above 1 GiB of VRAM (clear of WPR2 @ 0x18040000)
 
@@ -91,8 +108,6 @@ class Device:
             self.code_pa = ch.alloc_map(CODE_VA, CODE_SIZE)
             ch.vmm.map(TLS_VA, TLS_PA, TLS_PER_SM * TLS_SMS, flush=False)
             ch.vmm.map(MODDATA_VA, MODDATA_PA, MODDATA_SIZE, flush=False)
-            self.qmd_pa = ch.alloc_map(QMD_VA, RING * 0x100)
-            self.cb_pa = ch.alloc_map(CB_VA, RING * CB_SLOT)
             self.sem_pa = ch.alloc_map(SEM_VA, 0x1000)
             ch.vmm.flush()
             ok = ch.setup()
@@ -107,11 +122,184 @@ class Device:
         self.code_off = CODE_OFF0
         self.moddata_off = 0
         self.icache_dirty = True
-        self.slot = 0
         self.seq = 0x100
         self.va_next = DATA_VA0
         self.allocs = []                        # (va, size, Buffer), sorted by va
         self._submit(compute.compute_state(TLS_VA, TLS_PER_SM, CODE_VA), "compute state")
+        self._host_ring_init()
+        if UPLOAD != "host":
+            self.vcb_pa = ch.alloc_map(VCB_VA, NSLOT * CB_SLOT)
+            self.vqmd_pa = ch.alloc_map(VQMD_VA, NSLOT * 0x100)
+            ch.vmm.flush()
+        ks = self.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kernels", "xfer.sm_61.cubin"))
+        self.k_xcopy, self.k_xfill = ks["xcopy"], ks["xfill"]
+
+    # ------------------------------------------------------------ host ring
+    def _host_ring_init(self):
+        c, ch = self.c, self.ch
+        self.hmem, iovas = c.dev.alloc_sysmem(HOST_SIZE)
+        self.hv = self.hmem.mv
+        self.hv[0:H_STAGE] = bytes(H_STAGE)
+        self.iovas = iovas
+        # The FB's sysmem flush page (0x100c10, written on every system-memory barrier) must be a
+        # page *this* process owns. gr.py points it at its own page, which TinyGPU frees when gr.py
+        # exits; once the GPU touches host memory, barriers then write a dead or reused IOVA
+        # (seen: a corrupted host-ring slot, then a cold card).
+        c.wr(0x100c10, iovas[H_FLUSH // 0x1000] >> 8)
+        i = 0
+        while i < len(iovas):                     # map physically contiguous runs
+            j = i + 1
+            while j < len(iovas) and iovas[j] == iovas[j - 1] + 0x1000:
+                j += 1
+            ch.vmm.map(HOST_VA + i * 0x1000, iovas[i], (j - i) * 0x1000, aper="sys_coh", flush=False)
+            i = j
+        ch.vmm.flush()
+        # Move the GPFIFO into host memory (idle here: the compute-state submit completed).
+        n = ch.gp_entries * 8
+        assert n <= H_PROF - H_GPFIFO
+        self.hv[H_GPFIFO:H_GPFIFO + n] = c.vram_read(ch.gp_pa, n)
+        ch.vmm.map(ch.gp_va, iovas[H_GPFIFO // 0x1000], nvmmu.align(n, 0x1000), aper="sys_coh")
+        ch.gp_host = self.hv[H_GPFIFO:H_GPFIFO + n]
+        self.hseq = 0                              # last sequence number queued
+        self.hslot = 0
+        self.slot_seq = [0] * NSLOT                # seq of the launch that last used each slot
+        self.slot_prof = [None] * NSLOT            # kernel name, if that launch was timed
+        self.stage_seq = [0] * NSTAGE
+        self.stage_i = 0
+        self.prof = {}                             # kernel name -> [launches, GPU ns]
+
+    def done_seq(self):
+        return struct.unpack_from("<I", self.hv, H_SEM)[0]
+
+    def wait_seq(self, seq, timeout=20.0):
+        """Wait until the launch numbered seq (and so everything before it) has completed."""
+        if ((self.done_seq() - seq) & 0xffffffff) < 0x80000000:
+            return
+        t0 = time.perf_counter()
+        while ((self.done_seq() - seq) & 0xffffffff) >= 0x80000000:
+            dt = time.perf_counter() - t0
+            if dt > 0.02:                          # spin first (kernels take 10 us - 10 ms)
+                self.c.guard.check()
+                time.sleep(0.0002)
+            if dt > timeout:
+                compute.gr_error_dump(self.c)
+                faults.dump(self.c)
+                raise RuntimeError("launch %d did not complete (done %d): %s"
+                                   % (seq, self.done_seq(), self.ch.status()))
+
+    def drain(self):
+        self.wait_seq(self.hseq)
+        if PROF:
+            for s in range(NSLOT):
+                self._prof_take(s)
+
+    def _prof_take(self, s):
+        name = self.slot_prof[s]
+        if name is not None:
+            o = H_PROF + s * 32
+            t0, t1 = struct.unpack_from("<8xQ8xQ", self.hv, o)
+            e = self.prof.setdefault(name, [0, 0])
+            e[0] += 1; e[1] += t1 - t0
+            self.slot_prof[s] = None
+
+    @staticmethod
+    def _inline(va, data):
+        """Mesa nve4_compute_upload_input: the compute engine writes `data` to va (pitch, no
+        sysmembar) from the pushbuffer -- OFFSET_OUT, LINE_LENGTH_IN/COUNT, then one ONE_INC
+        header: LAUNCH_DMA, LOAD_INLINE_DATA x n."""
+        assert len(data) % 4 == 0
+        n = len(data) // 4
+        hdr = 0xa0000000 | ((n + 1) << 16) | (grchan.SUBC_CLASS << 13) | (0x01b0 >> 2)
+        return (compute.m(0x0188, va >> 32, va & 0xffffffff) + compute.m(0x0180, len(data), 1)
+                + [hdr, 0x41] + list(struct.unpack("<%dI" % n, data)))
+
+    def _hsem(self, va, payload, four_word):
+        return grchan.fifomod.mthd(grchan.SUBC_CLASS, 0x1b00, va >> 32, va & 0xffffffff, payload,
+                                   0 if four_word else (1 << 28))
+
+    def launch_async(self, k, grid, block, params: bytes, smem=0, timed=False):
+        """Queue a launch; returns its sequence number (see wait_seq)."""
+        s = self.hslot; self.hslot = (s + 1) % NSLOT
+        self.wait_seq(self.slot_seq[s])            # the GPU is done with this slot's last use
+        self._prof_take(s)
+        hv = self.hv
+        lmem = k.get("lmem", 0)
+        cb = compute.cbuf0(k, grid, block, params, stack=lmem, windows=(SHARED_WINDOW, LOCAL_WINDOW))
+        if len(cb) > CB_SLOT:
+            raise ValueError("%s: constant bank 0 needs %#x bytes (params %#x), slot is %#x"
+                             % (k["name"], len(cb), len(params), CB_SLOT))
+        po = H_PB + s * PB_SLOT
+        m = compute.m
+        pb = []
+        if UPLOAD == "host":
+            cb_va, qmd_va = HOST_VA + H_CB + s * CB_SLOT, HOST_VA + H_QMD + s * 0x100
+            hv[cb_va - HOST_VA:cb_va - HOST_VA + len(cb)] = cb
+        else:
+            cb_va = VCB_VA + s * CB_SLOT
+            qmd_va = VQMD_VA + s * 0x100 if UPLOAD == "all" else HOST_VA + H_QMD + s * 0x100
+            pb += self._inline(cb_va, cb)
+        qmd = compute.qmd_fast(k, tuple(grid), tuple(block), cb_va, nvmmu.align(len(cb), 0x100), dyn_shared=smem)
+        if UPLOAD == "all":
+            pb += self._inline(qmd_va, qmd)
+        else:
+            hv[qmd_va - HOST_VA:qmd_va - HOST_VA + 0x100] = qmd
+        self.hseq = seq = (self.hseq + 1) & 0xffffffff
+        if self.icache_dirty:                   # INVALIDATE_SHADER_CACHES: INSTRUCTION | DATA | CONSTANT
+            pb += m(0x021c, (1 << 0) | (1 << 4) | (1 << 12))
+            self.icache_dirty = False
+        timed = timed or PROF
+        if timed:
+            pb += self._hsem(HOST_VA + H_PROF + s * 32, 0, True)
+        pb += m(0x02b4, qmd_va >> 8) + m(0x02bc, 0x3) + m(0x0110, 0)
+        if timed:
+            pb += self._hsem(HOST_VA + H_PROF + s * 32 + 16, 0, True)
+        pb += self._hsem(HOST_VA + H_SEM, seq, False)
+        data = struct.pack("<%dI" % len(pb), *pb)
+        assert len(data) <= PB_SLOT
+        hv[po:po + len(data)] = data
+        self.slot_seq[s] = seq
+        self.slot_prof[s] = k["name"] if timed else None
+        self.ch.gp_entry(HOST_VA + po, len(data))
+        self.ch.kick()
+        return seq
+
+    # ------------------------------------------------------------ stream-ordered copies
+    @staticmethod
+    def _grid(n):
+        return (max(1, min(28 * 8, (n // 16 + 255) // 256)), 1, 1)
+
+    def copy_async(self, dst, src, n):
+        if n:
+            return self.launch_async(self.k_xcopy, self._grid(n), (256, 1, 1), struct.pack("<QQQ", src, dst, n))
+
+    def fill_async(self, dst, pat32, n):
+        if n:
+            return self.launch_async(self.k_xfill, self._grid(n), (256, 1, 1), struct.pack("<QI4xQ", dst, pat32, n))
+
+    def _stage(self):
+        i = self.stage_i; self.stage_i = (i + 1) % NSTAGE
+        self.wait_seq(self.stage_seq[i])
+        return i, H_STAGE + i * STAGE_CHUNK
+
+    def htod(self, va, data):
+        """Host -> device, in stream order (data is captured before this returns)."""
+        mv = memoryview(data)
+        for off in range(0, len(mv), STAGE_CHUNK):
+            part = mv[off:off + STAGE_CHUNK]
+            i, ho = self._stage()
+            self.hv[ho:ho + len(part)] = part
+            self.stage_seq[i] = self.copy_async(va + off, HOST_VA + ho, len(part))
+
+    def dtoh(self, va, n):
+        """Device -> host after everything queued before it."""
+        out = bytearray(n)
+        for off in range(0, n, STAGE_CHUNK):
+            k = min(STAGE_CHUNK, n - off)
+            i, ho = self._stage()
+            self.stage_seq[i] = seq = self.copy_async(HOST_VA + ho, va + off, k)
+            self.wait_seq(seq)
+            out[off:off + k] = self.hv[ho:ho + k]
+        return bytes(out)
 
     def _clear_faults(self):
         import io, contextlib
@@ -148,6 +336,7 @@ class Device:
 
     def free(self, va):
         """Unmap; VRAM is not recycled yet (bump heap) -- MAX allocates one pool."""
+        self.drain()                            # queued kernels may still use it
         for i, (base, size, buf) in enumerate(self.allocs):
             if base == va:
                 self.ch.vmm.unmap(va, size)
@@ -246,6 +435,7 @@ class Device:
 
     def module_rewind(self, mark):
         """Forget every module loaded after `mark` (their code/data space is reused)."""
+        self.drain()
         self.code_off, self.moddata_off = mark
         self.icache_dirty = True
 
@@ -274,28 +464,9 @@ class Device:
 
     def launch(self, k, grid, block, params: bytes, smem=0):
         """Synchronous launch; returns GPU-measured kernel time in ns. smem = dynamic shared bytes."""
-        s = self.slot; self.slot = (self.slot + 1) % RING
-        qmd_va, cb_va = QMD_VA + s * 0x100, CB_VA + s * CB_SLOT
-        lmem = k.get("lmem", 0)
-        cb = compute.cbuf0(k, grid, block, params, stack=lmem, windows=(SHARED_WINDOW, LOCAL_WINDOW))
-        if len(cb) > CB_SLOT:
-            raise ValueError("%s: constant bank 0 needs %#x bytes (params %#x), slot is %#x"
-                             % (k["name"], len(cb), len(params), CB_SLOT))
-        self.c.vram_write(self.cb_pa + s * CB_SLOT, cb)
-        self.c.vram_write(self.qmd_pa + s * 0x100, compute.build_qmd(
-            k, grid, block, cb_va, nvmmu.align(len(cb), 0x100), prog_off=k["prog_off"], dyn_shared=smem,
-            lmem=lmem, cbanks=k.get("cbanks", {})))
-        o0, s0 = self._sem(0x7a000000 | s, four_word=True)
-        o1, s1 = self._sem(0x7b000000 | s, four_word=True)
-        for o in (o0, o1):
-            self.c.vram_write(self.sem_pa + o, bytes(16))
-        m = compute.m
-        pb = []
-        if self.icache_dirty:                   # INVALIDATE_SHADER_CACHES: INSTRUCTION | DATA | CONSTANT
-            pb += m(0x021c, (1 << 0) | (1 << 4) | (1 << 12))
-            self.icache_dirty = False
-        pb += m(0x0110, 0) + s0 + m(0x02b4, qmd_va >> 8) + m(0x02bc, 0x3) + m(0x0110, 0) + s1
-        self._submit(pb, k["name"])
-        w0 = struct.unpack("<IIQ", self.c.vram_read(self.sem_pa + o0, 16))
-        w1 = struct.unpack("<IIQ", self.c.vram_read(self.sem_pa + o1, 16))
-        return w1[2] - w0[2]
+        s = self.hslot
+        self.wait_seq(self.launch_async(k, grid, block, params, smem=smem, timed=True))
+        t0, t1 = struct.unpack_from("<8xQ8xQ", self.hv, H_PROF + s * 32)
+        if not PROF:
+            self.slot_prof[s] = None
+        return t1 - t0

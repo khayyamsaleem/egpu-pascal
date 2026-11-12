@@ -8,7 +8,7 @@ hit a device that was no longer there.  On Apple Silicon that bus error is fatal
   * hold_awake()   keeps the Mac out of idle sleep for as long as this process lives
                    (`caffeinate -i -s -w <pid>`; -s also covers system sleep on AC power).
                    Closing the lid can still sleep a MacBook without an external display.
-  * SleepGuard     records kern.waketime at start; check() costs one sysctl (~1 us) and raises
+  * SleepGuard     records kern.waketime at start; check() costs two sysctls (~3 us, at most every 50 ms of wall time) and raises
                    SystemSlept, before any access, once the Mac has slept since.  After a sleep
                    the card is cold anyway: re-run devinit.py + fb.py + reset_engines.py + gr.py.
 """
@@ -45,7 +45,15 @@ class SleepGuard:
         return (_sysctl_timeval(b"kern.waketime") != self.wake0
                 or _sysctl_timeval(b"kern.sleeptime") != self.sleep0)
 
+    INTERVAL = 0.05     # re-check at most every 50 ms of *wall* time: the wall clock jumps across a
+    _last = 0.0         # sleep, so the first check after a wake always runs the sysctls
+
     def check(self):
+        import time
+        now = time.time()
+        if 0 <= now - self._last < self.INTERVAL:
+            return
+        self._last = now
         if self.slept():
             raise SystemSlept("the Mac slept since this process opened the GPU; the Thunderbolt "
                               "link may be gone, so no further MMIO (re-init the card)")

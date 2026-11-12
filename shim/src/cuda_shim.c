@@ -9,8 +9,10 @@
  *                          host.docker.internal:7461), which drives the card through
  *                          pascal/nvpascal.py.  Device pointers are real GPU VAs.
  *
- * Contexts/streams/events are bookkeeping in both modes: the server executes every
- * operation synchronously and in order, so stream semantics hold trivially.
+ * Contexts/streams/events are bookkeeping in both modes. Remote mode keeps one in-order queue:
+ * launches, HtoD, DtoD and memsets are sent without waiting (the server queues them on the GPU);
+ * DtoH, frees and the synchronize calls wait for everything sent before them, and return any
+ * error an earlier queued op hit.
  * Every symbol MAX resolves (src/cuda_symbols.txt) is exported; the rest come from
  * gen_stubs.py and return CUDA_ERROR_NOT_SUPPORTED after logging.
  * Logging: stderr, or $SHIM_LOG; $SHIM_QUIET=1 logs only errors/stubs/launches.
@@ -196,14 +198,17 @@ struct event { double t; };
 CUresult cuStreamCreate(CUstream *s, unsigned flags) { *s = &stream_objs[n_streams++ & 255]; return CUDA_SUCCESS; }
 CUresult cuStreamCreateWithPriority(CUstream *s, unsigned flags, int prio) { *s = &stream_objs[n_streams++ & 255]; return CUDA_SUCCESS; }
 CUresult cuStreamDestroy(CUstream s) { return CUDA_SUCCESS; }
-CUresult cuStreamSynchronize(CUstream s) { LOG("cuStreamSynchronize"); return CUDA_SUCCESS; }
+static CUresult sync_all(void) { return is_remote() ? shim_rpc(OP_SYNC, NULL, 0, NULL, 0, NULL, NULL) : CUDA_SUCCESS; }
+CUresult cuStreamSynchronize(CUstream s) { LOG("cuStreamSynchronize"); return sync_all(); }
+CUresult cuCtxSynchronize(void) { return sync_all(); }
+CUresult cuStreamQuery(CUstream s) { return sync_all(); }
 CUresult cuStreamWaitEvent(CUstream s, CUevent e, unsigned f) { return CUDA_SUCCESS; }
 CUresult cuStreamIsCapturing(CUstream s, int *st) { *st = 0; return CUDA_SUCCESS; }
 CUresult cuEventCreate(CUevent *e, unsigned flags) { *e = calloc(1, sizeof(struct event)); return CUDA_SUCCESS; }
 CUresult cuEventDestroy(CUevent e) { free(e); return CUDA_SUCCESS; }
 CUresult cuEventRecord(CUevent e, CUstream s) { ((struct event *)e)->t = now_ms(); return CUDA_SUCCESS; }
-CUresult cuEventQuery(CUevent e) { return CUDA_SUCCESS; }
-CUresult cuEventSynchronize(CUevent e) { return CUDA_SUCCESS; }
+CUresult cuEventQuery(CUevent e) { return sync_all(); }
+CUresult cuEventSynchronize(CUevent e) { return sync_all(); }
 CUresult cuEventElapsedTime(float *ms, CUevent a, CUevent b) { *ms = (float)(((struct event *)b)->t - ((struct event *)a)->t); return CUDA_SUCCESS; }
 
 /* ------------------------------------------------------------------ memory */
@@ -274,7 +279,7 @@ static CUresult htod(CUdeviceptr d, const void *s, size_t n) {
     for (size_t off = 0; off < n; off += CHUNK) {
         uint32_t k = (uint32_t)(n - off < CHUNK ? n - off : CHUNK);
         uint64_t va = d + off;
-        int st = shim_rpc(OP_HTOD, &va, 8, (const char *)s + off, k, NULL, NULL);
+        int st = shim_send(OP_HTOD, &va, 8, (const char *)s + off, k);
         if (st) return st;
     }
     return 0;
@@ -294,7 +299,7 @@ static CUresult dtod(CUdeviceptr d, CUdeviceptr s, size_t n) {
     LOG("DtoD(%#llx <- %#llx, %zu)", d, s, n);
     if (!is_remote()) { memmove((void *)(uintptr_t)d, (void *)(uintptr_t)s, n); return 0; }
     uint64_t req[3] = {d, s, n};
-    return shim_rpc(OP_DTOD, req, 24, NULL, 0, NULL, NULL);
+    return shim_send(OP_DTOD, req, 24, NULL, 0);
 }
 static CUresult dmemset(CUdeviceptr d, unsigned v, unsigned width, size_t count) {
     LOG("Memset(%#llx, %#x, w%u, %zu)", d, v, width, count);
@@ -303,7 +308,7 @@ static CUresult dmemset(CUdeviceptr d, unsigned v, unsigned width, size_t count)
         return 0;
     }
     struct __attribute__((packed)) { uint64_t va; uint32_t v, w; uint64_t n; } r = {d, v, width, count};
-    return shim_rpc(OP_MEMSET, &r, sizeof r, NULL, 0, NULL, NULL);
+    return shim_send(OP_MEMSET, &r, sizeof r, NULL, 0);
 }
 CUresult cuMemcpyHtoD_v2(CUdeviceptr d, const void *s, size_t n) { return htod(d, s, n); }
 CUresult cuMemcpyHtoD(CUdeviceptr d, const void *s, size_t n) { return htod(d, s, n); }
@@ -441,10 +446,8 @@ static CUresult launch(struct fn *f, unsigned gx, unsigned gy, unsigned gz, unsi
         if (o + s > plen) plen = o + s;
     }
     uint32_t hdr[10] = {(uint32_t)f->mod, (uint32_t)f->idx, gx, gy, gz, bx, by, bz, smem, plen};
-    uint64_t ns = 0; void *out = &ns; uint32_t got;
-    int st = shim_rpc(OP_LAUNCH, hdr, sizeof hdr, blob, plen, &out, &got);
-    LOGI("launch %s grid %u,%u,%u block %u,%u,%u smem %u -> status %d, %.1f us on GP102",
-         f->name, gx, gy, gz, bx, by, bz, smem, st, ns / 1e3);
+    int st = shim_send(OP_LAUNCH, hdr, sizeof hdr, blob, plen);
+    LOG("launch %s grid %u,%u,%u block %u,%u,%u smem %u -> queued (%d)", f->name, gx, gy, gz, bx, by, bz, smem, st);
     return st;
 }
 CUresult cuLaunchKernel(CUfunction f, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by, unsigned bz,

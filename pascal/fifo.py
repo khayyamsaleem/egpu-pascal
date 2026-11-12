@@ -193,9 +193,17 @@ class Channel:
         va = self.pb_va + self.pb_off
         self.c.vram_write(self.pb_pa + self.pb_off, data)
         self.pb_off += nvmmu.align(len(data), 0x100)
-        e0 = va & 0xfffffffc
-        e1 = ((va >> 32) & 0xff) | ((len(data) >> 2) << 10)
-        self.c.vram_write(self.gp_pa + self.gp_put * 8, struct.pack("<II", e0, e1))
+        self.gp_entry(va, len(data))
+
+    gp_host = None          # memoryview of the GPFIFO when it lives in host memory (nvpascal)
+
+    def gp_entry(self, va, nbytes):
+        """Queue one GP entry for nbytes of pushbuffer at va (not kicked)."""
+        e = struct.pack("<II", va & 0xfffffffc, ((va >> 32) & 0xff) | ((nbytes >> 2) << 10))
+        if self.gp_host is not None:
+            self.gp_host[self.gp_put * 8:self.gp_put * 8 + 8] = e
+        else:
+            self.c.vram_write(self.gp_pa + self.gp_put * 8, e)
         self.gp_put = (self.gp_put + 1) % self.gp_entries
 
     def kick(self):
