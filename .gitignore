@@ -9,7 +9,8 @@ firmware/*
 golden_ctx_gp102.bin
 *.rom
 # Third-party clones (prior art, references); see README "Prior art" / NOTICE.md
-upstream/
+# anchored: the root clones only - a bare "upstream/" also ignored docs/upstream/
+/upstream/
 tools/envytools/
 # scratch
 *.bak-*
