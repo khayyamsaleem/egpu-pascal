@@ -110,6 +110,7 @@ Pascal (§7).
 | 17 | softmax: ESR `0x0b` ILLEGAL_INSTR_PARAM | QMD `BARRIER_COUNT = 0` with `bar.sync` in the code (count is `.text` `sh_flags >> 20`) | set it from the cubin; reproduced with 0 vs 1 |
 | 18 | ~65th submission: MMU fault, client HOST, VA `0x204000` | 16 KiB pushbuffer never wrapped | 1 MiB pushbuffer that wraps once the channel has drained |
 | 19 | LLM ran but output only special tokens; sigmoid = 0 | `rcp.rn.f32` reads literals from the **per-kernel** `.nv.constant2.<kernel>`, which wasn't bound | load/bind per-kernel banks; `test_modules.py`: 512/512 bit-exact rcp/div |
+| 21 | **The Mac kernel-panicked and rebooted, twice** (`LLC Bus error ... addr=0x480400100 rd_ld` / `0x480703f6c ncwr`, panicked task `TinyGPU`) | the Mac slept during a run (`Clamshell Sleep`, then `Idle Sleep` with `pmset sleep 1`): the Thunderbolt link went down and the next MMIO on wake hit a missing device | `pascal/sleepguard.py`: every card-holding process keeps a `caffeinate -i -s` assertion, and every MMIO first checks `kern.waketime`/`kern.sleeptime` (4 us) and refuses after a sleep |
 | 20 | `cuMemset` ≥ 4 KiB silently did nothing | `fill32(u64, u32, u64)` params packed with `struct.pack("<QIQ")` (no CUDA alignment): `n` read as 0 | `"<QI4xQ"` |
 
 ## 5. Beliefs that turned out wrong (don't re-learn these)

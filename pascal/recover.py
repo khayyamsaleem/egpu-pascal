@@ -14,7 +14,7 @@ from card import Card
 
 
 def pccsr_clean(c, keep=()):
-    w = c.bar0[0x800000 // 4:0x808000 // 4]
+    c.guard.check(); w = c.bar0[0x800000 // 4:0x808000 // 4]
     n = 0
     for i in range(4096):
         if i in keep or not (w[2 * i] or w[2 * i + 1]):
@@ -22,7 +22,7 @@ def pccsr_clean(c, keep=()):
         c.mask(0x800004 + i * 8, 0x00000800, 0x00000800)     # ENABLE_CLR
         c.wr(0x800000 + i * 8, 0)
         n += 1
-    w = c.bar0[0x800000 // 4:0x808000 // 4]
+    c.guard.check(); w = c.bar0[0x800000 // 4:0x808000 // 4]
     left = [i for i in range(4096) if (w[2 * i] or w[2 * i + 1]) and i not in keep]
     return n, left
 

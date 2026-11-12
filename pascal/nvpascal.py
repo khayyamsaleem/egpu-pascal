@@ -15,6 +15,7 @@ Prerequisite on a warm card: pascal/reset_engines.py + pascal/gr.py.
 import os, struct, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from card import Card
+from sleepguard import SystemSlept   # re-exported for shimd
 import mmu as nvmmu
 import fifo as fifomod
 import gr as grmod

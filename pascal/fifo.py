@@ -57,8 +57,8 @@ class Fifo:
             print("FIFO init: %d PBDMAs, 0x2200=%08x 0x2254=%08x, 0x204=%08x"
                   % (nr, c.rd(0x2200), c.rd(0x2254), c.rd(0x204)))
 
-    def userd_w32(self, chid, off, v): self.bar1[(USERD_BASE + chid * USERD_SIZE + off) // 4] = v
-    def userd_r32(self, chid, off): return self.bar1[(USERD_BASE + chid * USERD_SIZE + off) // 4]
+    def userd_w32(self, chid, off, v): self.c.guard.check(); self.bar1[(USERD_BASE + chid * USERD_SIZE + off) // 4] = v
+    def userd_r32(self, chid, off): self.c.guard.check(); return self.bar1[(USERD_BASE + chid * USERD_SIZE + off) // 4]
 
 
 class Channel:

@@ -186,6 +186,9 @@ class Server:
             self._client(conn, owned)
         except (ConnectionError, EOFError):
             pass
+        except nvpascal.SystemSlept as e:       # cleanup below would itself be MMIO: stop now
+            print("shimd: %s -- exiting without touching the card" % e, flush=True)
+            os._exit(3)
         finally:
             conn.close()
             n_owned = len(owned)

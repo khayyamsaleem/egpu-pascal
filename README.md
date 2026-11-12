@@ -94,6 +94,12 @@ ns = dev.launch(k, (32, 1, 1), (128, 1, 1), struct.pack("<QQQI", a.va, b.va, c.v
 * An out-of-range or wrong BAR0 write can take the PRI ring down; recovery is an
   enclosure power cycle. `card.py` asserts the BAR0 range.
 * Never write falcon `0x000/0x004/0x010/0x014` (IRQ set/clear registers) from a probe.
+* **Don't let the Mac sleep while anything holds the card.** Sleep takes the Thunderbolt link
+  down, and the next MMIO on wake is a fatal `LLC Bus error` kernel panic (it happened twice:
+  lid close, then a 1-minute idle sleep). `pascal/card.py` now holds a `caffeinate` assertion for
+  as long as a process has the card open, and refuses all MMIO once the Mac has slept
+  (`pascal/sleepguard.py`). Closing the lid can still sleep a MacBook without an external
+  display, so keep it open during runs. After any sleep the card is cold: devinit + fb + gr.
 * tinygrad's own NV runtime will issue a PCIe FLR on Pascal (it misreads a Turing WPR2
   register); don't point `NV=1` tinygrad at this card.
 
