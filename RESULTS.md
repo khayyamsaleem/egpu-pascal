@@ -6,9 +6,10 @@ card, with a negative control where one applies. The evidence trail is in
 
 **Bottom line:** the card goes from cold power-on to running ptxas-compiled sm_61
 kernels, with results landing in Mac host memory, entirely from macOS over
-Thunderbolt and with no NVIDIA driver. **Modular MAX now runs an LLM on it:**
-`max generate` with SmolLM2-135M-Instruct (fp32) produces text identical to
-MAX-on-CPU over 64 greedy tokens, at **6.6 tokens/s** (§9). The card runs at boot
+Thunderbolt and with no NVIDIA driver. **Modular MAX runs LLMs on it:** SmolLM2-135M
+(fp32) gives text identical to MAX-on-CPU at **6.6 tokens/s**, and **Gemma 4 E2B**
+(bf16, MAX nightly) answers "The capital of France is **Paris**." exactly as
+transformers does, at **1.9 tokens/s** (§9). The card runs at boot
 clocks: **607 MHz SM, 405 MHz memory, about 30 GB/s DRAM bandwidth**.
 
 | | |
@@ -111,6 +112,8 @@ Pascal (§7).
 | 18 | ~65th submission: MMU fault, client HOST, VA `0x204000` | 16 KiB pushbuffer never wrapped | 1 MiB pushbuffer that wraps once the channel has drained |
 | 19 | LLM ran but output only special tokens; sigmoid = 0 | `rcp.rn.f32` reads literals from the **per-kernel** `.nv.constant2.<kernel>`, which wasn't bound | load/bind per-kernel banks; `test_modules.py`: 512/512 bit-exact rcp/div |
 | 21 | **The Mac kernel-panicked and rebooted, twice** (`LLC Bus error ... addr=0x480400100 rd_ld` / `0x480703f6c ncwr`, panicked task `TinyGPU`) | the Mac slept during a run (`Clamshell Sleep`, then `Idle Sleep` with `pmset sleep 1`): the Thunderbolt link went down and the next MMIO on wake hit a missing device | `pascal/sleepguard.py`: every card-holding process keeps a `caffeinate -i -s` assertion, and every MMIO first checks `kern.waketime`/`kern.sleeptime` (4 us) and refuses after a sleep |
+| 22 | Gemma 4 output varied run to run (from layer 1 on) | `Card.vram_write`/`vram_read` rounded unaligned addresses down and zero-padded odd lengths: a 2-byte-aligned bf16 copy landed shifted and clobbered up to 3 bytes past its end (fp32 workloads never hit it) | read-modify-write of the partial first/last word; random test vs a host model, `shim/tests/copy_check.py` |
+| 23 | Gemma 4: per-layer inputs for layers ≥ 1 were zeros/garbage, deterministically | each launch's constant bank 0 was a 4 KiB slot bound with size 0x1000, but sm_6x allows 0x1100 bytes of params after the 0x140 driver area. MAX's multi-output fused kernels (one output pointer per layer, 3856-byte params) lost their last parameters: the later layers' output pointers read as 0 | 8 KiB slots bound at the cbuf's real size (+ a hard error past the slot), 8 KiB shim param blob |
 | 20 | `cuMemset` ≥ 4 KiB silently did nothing | `fill32(u64, u32, u64)` params packed with `struct.pack("<QIQ")` (no CUDA alignment): `n` read as 0 | `"<QI4xQ"` |
 
 ## 5. Beliefs that turned out wrong (don't re-learn these)
@@ -314,3 +317,49 @@ Known gaps:
 * An assert firing in a kernel still traps the SM (needs a GR reset), since
   `vprintf` is a no-op stub.
 * Module space is reclaimed only when every client disconnects.
+
+### Session 8 (2026-11-12): Gemma 4 E2B on the card; the two reboots explained
+
+**Gemma 4 E2B (bf16) runs on MAX nightly `26.8.0.dev2026110805`:**
+
+* `max generate --model google/gemma-4-E2B-it --quantization-encoding bfloat16 --devices gpu --top-k 1 --no-prefer-module-v3`
+  answers "The capital of France is **Paris**.", identical to transformers on CPU.
+* A haiku prompt gives the same coherent text on two runs. A 64-token explanation of what a
+  GPU does is fluent: 57 tokens, TTFT 2.2 s, 530 ms/token (1.9 tok/s).
+* Logs: `logs/s8-gemma4-e2b-*.log`.
+
+What it took. Each item was reproduced and isolated on the card, mostly by comparing per-layer
+hidden states with a transformers reference.
+
+* **MAX nightly, not 26.6.** The 26.6 release has no Gemma 4 E-series support.
+  * On the nightly, the default ModuleV3 implementation lacks per-layer embeddings (PLE) and the
+    double-wide MLP, so the run needs `--no-prefer-module-v3`.
+  * The nightly needed two more shim entry points: `cuMemcpyBatchAsync` (12.8 ABI, unified
+    addresses classified against the server's ranges) and `cuDeviceGetUuid[_v2]`.
+  * `maxpatch` ports the target and matmul patches to the nightly.
+  * It adds a std `tanh` fallback for pre-Turing GPUs; GELU-tanh and logit softcapping need it.
+* **bf16 on Pascal works.** LLVM widens bf16 to fp32 on sm_61. `ops_check --dtype bfloat16`
+  passes 12/12, and SmolLM2 bf16 is coherent.
+* **Fitting 11 GB.** E2B is 5.1B params (9.3 GB of text weights in bf16), and 4.7 GB of that is
+  the PLE table. Each token reads one 8960-wide row, so the table stays in host memory and the
+  GPU gets the gathered rows, leaving 4.6 GB on the device. The memory planner and weight rules
+  follow suit (`maxpatch/patches/26.8.*/0003`).
+* **Two driver bugs, found because Gemma is the first bf16/large-kernel workload.**
+  Blocker 22 was unaligned PRAMIN copies, which made runs non-deterministic. Blocker 23 was the
+  4 KiB constant-bank slot, which truncated MAX's multi-output kernels' parameters. With both
+  fixed, upstream's per-layer code runs unmodified, and the overlap scheduler works.
+* **Ruled out on the way, each with a test:**
+  * attention at depth 256/512: upstream's attention tests pass at E2B dims, sliding, global
+    and KV sharing
+  * RoPE: the applied cos/sin recovered from the kernel match the analytic values
+  * MMU mapping of the 8.8 GiB pool: `pascal/test_bigmap.py`, 8990/8990 chunks
+  * the host-PLE lookup mechanics: `shim/tests/host_embed_check.py`
+
+**The reboots (blocker 21).** Both were kernel panics when the Mac woke while the driver held
+the card. Lid close the first time, a 1-minute idle sleep the second (`pmset sleep 1`).
+`pascal/sleepguard.py` now prevents the sleep and refuses MMIO after one.
+
+Known gaps:
+* Gemma 4 **E4B** needs 9.4 GB on the device even with host PLE, which doesn't fit.
+* Decode is launch-bound: ~700 launches per token at ~0.4 ms each.
+* `tanh` on 26.6 is still unpatched; only the nightly set has the std rebuild.

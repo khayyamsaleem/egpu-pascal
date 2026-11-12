@@ -1,9 +1,8 @@
 # Making the GTX 1080 Ti (GP102) do inference from this MacBook Air
 
-> **Status 2026-11-09 (session 7): rungs 0–5 DONE.** MAX runs SmolLM2-135M on the card
-> through the libcuda/NVML shim + `maxpatch/` (GPU text == CPU text, 6.6 tok/s; see
-> [RESULTS.md](RESULTS.md) §9). Next: launch overhead, bigger models (§7). Boot clocks:
-> 607 MHz SM / 405 MHz memory.
+> **Status 2026-11-12 (session 8): rungs 0–5 DONE.** MAX runs SmolLM2-135M and Gemma 4 E2B
+> on the card through the libcuda/NVML shim + `maxpatch/` (see [RESULTS.md](RESULTS.md) §9).
+> Next: launch overhead, bigger models (§7). Boot clocks: 607 MHz SM / 405 MHz memory.
 
 
 Plan of record, 2026-11-08. Host: MacBook Air M1, macOS 26.6.2. Enclosure: Razer

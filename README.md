@@ -6,9 +6,10 @@ runs over tinygrad's TinyGPU DriverKit transport.
 
 **Status (2026-11-09):** the card POSTs from macOS, secure-boots its graphics firmware,
 and runs **ptxas-compiled sm_61 CUDA kernels** dispatched through our own channel/QMD code.
-**Modular MAX runs an LLM on it**: `max generate` with SmolLM2-135M-Instruct (fp32)
-gives text identical to MAX-on-CPU at 6.6 tokens/s, through a libcuda/NVML shim and
-two small local MAX patches ([`maxpatch/`](maxpatch/)).
+**Modular MAX runs LLMs on it** through a libcuda/NVML shim and local MAX patches
+([`maxpatch/`](maxpatch/)): SmolLM2-135M (fp32, text identical to MAX-on-CPU, 6.6 tok/s)
+and **Gemma 4 E2B** (bf16 on the MAX nightly, "The capital of France is **Paris**." as
+transformers gives, 1.9 tok/s).
 Full results: **[RESULTS.md](RESULTS.md)**.
 
 ```
@@ -17,7 +18,7 @@ rung 1  our microcode on a falcon                         DONE
 rung 2  ACR secure boot, FECS/GPCCS running               DONE
 rung 3  MMU v2 + GPFIFO channel + copy engine             DONE
 rung 4  compute dispatch: sm_61 vadd -> host memory        DONE
-rung 5  model inference (MAX): SmolLM2-135M generates     DONE (first model; speed work next)
+rung 5  model inference (MAX): SmolLM2-135M, Gemma 4 E2B  DONE (speed work next)
 ```
 
 Boot clocks only for now: 607 MHz SM, 405 MHz memory (~30 GB/s measured).
@@ -62,6 +63,10 @@ git clone --depth 1 --branch max/v26.6.0 https://github.com/modular/modular.git 
 docker exec maxlab bash /repo/maxpatch/install.sh            # sm_61 target + SIMT matmul
 docker exec maxlab bash /repo/shim/tests/generate.sh gpu "The capital of France is"
 #   -> The capital of France is Paris.
+# Gemma 4 E2B: MAX nightly container (see maxpatch/README.md), then
+docker exec maxnightly bash -lc 'MODEL=google/gemma-4-E2B-it ENCODING=bfloat16 MAX_GEMMA4_ACTIVATION_MIB=1024 \
+    bash /repo/shim/tests/generate.sh gpu "The capital of France is" --no-prefer-module-v3'
+#   -> The capital of France is **Paris**.
 ```
 
 ## Using the runtime

@@ -1,0 +1,138 @@
+diff --git a/max/python/max/pipelines/architectures/gemma4/gemma4.py b/max/python/max/pipelines/architectures/gemma4/gemma4.py
+index 6b742a64ab..169de88715 100644
+--- a/max/python/max/pipelines/architectures/gemma4/gemma4.py
++++ b/max/python/max/pipelines/architectures/gemma4/gemma4.py
+@@ -31,6 +31,7 @@ from max.graph import (
+     TensorValue,
+     Type,
+     Value,
++    Weight,
+     ops,
+ )
+ from max.graph import Module as GraphModule
+@@ -70,6 +71,41 @@ from .layers.rotary_embedding import ProportionalRotaryEmbedding
+ from .model_config import Gemma4ForConditionalGenerationConfig
+ 
+ 
++class _HostScaledEmbedding(Module):
++    """[egpu-pascal] The per-layer embedding (PLE) table kept in host memory.
++
++    E2B/E4B's PLE table is 2.35B/2.82B parameters (4.7/5.6 GB in bf16), but each
++    token reads one 8960/10752-wide row, so the lookup runs on the CPU and only
++    the gathered rows go to the GPU. Same weight name as ScaledWordEmbedding, so
++    checkpoint loading is unchanged. Opt out with GEMMA4_PLE_ON_HOST=0.
++    """
++
++    def __init__(
++        self,
++        vocab_size: int,
++        hidden_dim: int,
++        dtype: DType,
++        devices: list[DeviceRef],
++        embed_scale: float = 1.0,
++    ) -> None:
++        super().__init__()
++        self.weight = Weight(
++            "weight", dtype, [vocab_size, hidden_dim], device=DeviceRef.CPU()
++        )
++        self.devices = devices
++        self.embed_scale = embed_scale
++
++    def __call__(
++        self, indices: TensorValue, signal_buffers: Sequence[BufferValue]
++    ) -> list[TensorValue]:
++        idx = ops.transfer_to(TensorValue(indices), DeviceRef.CPU())
++        rows = ops.gather(self.weight, idx, axis=0)
++        return [
++            ops.transfer_to(rows, device) * float(self.embed_scale)
++            for device in self.devices
++        ]
++
++
+ def language_input_tree(
+     devices: Sequence[DeviceRef],
+     dtype: DType,
+@@ -261,7 +297,12 @@ class Gemma4TextModel(DistributedLogitsPostprocessMixin, Module):
+             packed_dim = (
+                 text_config.num_hidden_layers * self.hidden_size_per_layer_input
+             )
+-            self.embed_tokens_per_layer = ScaledWordEmbedding(
++            ple_cls = (  # [egpu-pascal] host-side PLE unless GEMMA4_PLE_ON_HOST=0
++                _HostScaledEmbedding
++                if __import__("os").environ.get("GEMMA4_PLE_ON_HOST", "1") != "0"
++                else ScaledWordEmbedding
++            )
++            self.embed_tokens_per_layer = ple_cls(
+                 text_config.vocab_size_per_layer_input,
+                 packed_dim,
+                 embedding_output_dtype,
+diff --git a/max/python/max/pipelines/architectures/gemma4/memory_planner.py b/max/python/max/pipelines/architectures/gemma4/memory_planner.py
+index 1a566b6f29..4f472359b8 100644
+--- a/max/python/max/pipelines/architectures/gemma4/memory_planner.py
++++ b/max/python/max/pipelines/architectures/gemma4/memory_planner.py
+@@ -15,6 +15,8 @@
+ 
+ from __future__ import annotations
+ 
++import os
++
+ from max.pipelines.kv_cache import cache_dtype_for_encoding
+ from max.pipelines.kv_cache.memory_planner import PagedMemoryPlanner
+ from max.pipelines.lib.config import PipelineConfig
+@@ -36,6 +38,30 @@ class Gemma4MemoryPlanner(PagedMemoryPlanner):
+ 
+     _always_signal_buffers = True
+ 
++    def estimate_weights_size(self, pipeline_config: PipelineConfig) -> int:
++        """[egpu-pascal] Device-resident weights only.
++
++        The E2B/E4B per-layer embedding table stays in host memory
++        (``gemma4._HostScaledEmbedding``), so it doesn't count against the GPU.
++        """
++        size = super().estimate_weights_size(pipeline_config)
++        hf = pipeline_config.model.huggingface_config
++        text = getattr(hf, "text_config", hf)
++        per_layer = getattr(text, "hidden_size_per_layer_input", 0) or 0
++        if per_layer and os.environ.get("GEMMA4_PLE_ON_HOST", "1") != "0":
++            encoding = _select_quantization_encoding(
++                pipeline_config.model,
++                Gemma4ForConditionalGenerationConfig.DEFAULT_ENCODING,
++            )
++            dtype_bytes = 1 if "float4" in str(encoding) else 2
++            size -= (
++                text.vocab_size_per_layer_input
++                * text.num_hidden_layers
++                * per_layer
++                * dtype_bytes
++            )
++        return max(size, 0)
++
+     def estimate_activation_memory(
+         self,
+         pipeline_config: PipelineConfig,
+@@ -67,4 +93,8 @@ class Gemma4MemoryPlanner(PagedMemoryPlanner):
+             pipeline_config.model.kv_cache.kv_cache_format,
+         )
+         base = (30 // cache_dtype.size_in_bytes) * 1024**3
++        # [egpu-pascal] opt-in override for small GPUs / short contexts.
++        override = os.environ.get("MAX_GEMMA4_ACTIVATION_MIB")
++        if override:
++            base = int(override) * 1024**2
+         return base * len(pipeline_config.model.device_specs)
+diff --git a/max/python/max/pipelines/architectures/gemma4/weight_adapters.py b/max/python/max/pipelines/architectures/gemma4/weight_adapters.py
+index 25c0a880b7..28ee76f24e 100644
+--- a/max/python/max/pipelines/architectures/gemma4/weight_adapters.py
++++ b/max/python/max/pipelines/architectures/gemma4/weight_adapters.py
+@@ -33,9 +33,9 @@ GEMMA4_VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.")
+ 
+ GEMMA4_WEIGHT_RULES: tuple[WeightRule, ...] = (
+     Ignore(
+-        r"^model\.(embed_audio|vision_embedder)\.",
+-        reason="the unified checkpoints' audio and patch embedders, which"
+-        " MAX does not implement",
++        r"^model\.(embed_audio|audio_tower|vision_embedder)\.",
++        reason="the unified checkpoints' audio and patch embedders and the"
++        " E2B/E4B audio tower, which MAX does not implement",  # [egpu-pascal]
+     ),
+     Ignore(
+         r"\.(k|v)_scale$",

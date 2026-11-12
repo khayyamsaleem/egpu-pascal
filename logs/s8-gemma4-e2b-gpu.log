@@ -1,0 +1,58 @@
+15:56:15.671 INFO: Metrics initialized.
+15:56:15.672 INFO: Tracing off; set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT to export spans.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+15:56:18.966 INFO: set VIDEO_TOTAL_PIXELS: 90316800
+15:56:19.334 INFO: Defaulting structured output backend to the global default 'xgrammar' (architecture Gemma4ForConditionalGeneration declares no default). Override with --structured-output-backend.
+15:56:19.334 INFO: Automatically enabling overlap scheduling for Gemma4ForConditionalGeneration. You can manually disable this by setting --no-enable-overlap-scheduler.
+15:56:19.335 WARNING: Reduced the preprocessed-media cache from 20.00 GiB to 1.95 GiB (1000.52 MiB images, 1000.52 MiB video): the configured ceiling exceeded 25% of the 7.82 GiB this process may use.
+15:56:19.335 INFO: Defaulting reasoning parser to 'gemma4' for architecture Gemma4ForConditionalGeneration. Override with --reasoning-parser, or pass --reasoning-parser=none to disable.
+15:56:19.335 INFO: Defaulting tool parser to 'gemma4' for architecture Gemma4ForConditionalGeneration. Override with --tool-parser, or pass --tool-parser=none to disable.
+15:56:19.336 INFO: devices: gpu[0]
+15:56:19.379 INFO: Vision encoder cache: 171 blocks x 128 tokens sharded across 1 device(s), 64.12 MiB reserved (64.12 MiB per device).
+15:56:19.380 INFO: cache_memory: 15.75 MiB
+15:56:21.519 INFO: All weight files for google/gemma-4-E2B-it found in local HF cache.
+15:56:29.775 INFO: Ignored 752 checkpoint weights matching '^model\\.(embed_audio|audio_tower|vision_embedder)\\.': the unified checkpoints' audio and patch embedders and the E2B/E4B audio tower, which MAX does not implement
+15:56:29.782 INFO: Building, compiling, and initializing model...
+15:56:29.806 INFO: Building model graph took 0.0 seconds
+15:57:29.784 INFO: Still compiling model (60.0s elapsed)
+15:58:29.795 INFO: Still compiling model (120.0s elapsed)
+15:59:23.858 INFO: Compiling model took 93.6 seconds
+15:59:23.859 INFO: Initializing model took 78.7 seconds
+15:59:23.859 INFO: Building, compiling, and initializing model took 174.1 seconds
+15:59:23.866 INFO: Using Jenga KV cache. To fall back to using the legacy KV cache, set MODULAR_USE_LEGACY_KV_CACHE=1
+15:59:23.867 INFO: Jenga KV manager: 4 huge pages x 3.50 MiB = 14.00 MiB (per device), page_size 128 tokens
+15:59:23.868 INFO: 	sliding_attention.sliding_window_group(512): 4 pages of 3.50 MiB  (1 per huge page)
+15:59:23.868 INFO: 	full_attention.full_group                  : 8 pages of 1.75 MiB  (2 per huge page)
+15:59:23.868 WARNING: Jenga KV geometry can strand 66.7% of the per-device KV budget: 2 leaves plus the null block each own whole 3.50 MiB huge blocks, out of 15.75 MiB. Setting a stride alignment on the leaf that inflates the huge block lets the planner pad it.
+15:59:23.879 INFO: Building, compiling, and initializing sampler...
+15:59:23.882 INFO: Building sampler graph took 0.0 seconds
+15:59:57.917 INFO: Compiling sampler took 32.4 seconds
+15:59:57.917 INFO: Initializing sampler took 0.0 seconds
+15:59:57.917 INFO: Building, compiling, and initializing sampler took 34.0 seconds
+15:59:57.918 INFO: Building, compiling, and initializing realize_future_token...
+15:59:58.499 INFO: Building realize_future_token graph took 0.6 seconds
+16:00:06.317 INFO: Compiling realize_future_token took 7.8 seconds
+16:00:06.317 INFO: Initializing realize_future_token took 0.0 seconds
+16:00:06.317 INFO: Building, compiling, and initializing realize_future_token took 8.4 seconds
+16:00:06.318 INFO: 
+16:00:06.318 INFO: ============================================================
+16:00:06.318 INFO: Pipeline Configuration (use --pretty-print-config to print full config)
+16:00:06.318 INFO: ============================================================
+16:00:06.318 INFO:     architecture         : Gemma4ForConditionalGeneration
+16:00:06.318 INFO:     pipeline             : OverlapTextGenerationPipeline
+16:00:06.318 INFO:     model                : google/gemma-4-E2B-it
+16:00:06.318 INFO:     max_seq_len          : 256
+16:00:06.318 INFO:     device_graph_capture : False
+16:00:06.318 INFO: 
+16:00:06.318 INFO: max_batch_size: 1
+16:00:06.320 INFO: Beginning text generation
+A GPU (Graphics Processing Unit) is a specialized electronic circuit designed to rapidly manipulate and accelerate the creation of images, videos, and complex parallel computations. It excels at performing the massive number of simultaneous calculations required for tasks like rendering graphics in video games or training artificial intelligence models.
+Prompt size: 19
+Output size: 57
+Startup time: 14.031171798706055 ms
+Time to first token: 2211.7316722869873 ms
+Prompt eval throughput (context-encoding): 8.590553835291201 tokens per second
+Time per Output Token: 530.126188482557 ms
+Eval throughput (token-generation): 1.8863433305613866 tokens per second
+Total Latency: 31898.79822731018 ms
+Total Throughput: 0.03134914340264547 req/s
