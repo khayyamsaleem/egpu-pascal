@@ -360,7 +360,13 @@ def cmd_pull(a):
 def cmd_stop(a):
     stop_servers(); say("server stopped")
     if a.all:
-        kill("shimd"); say("driver server stopped; the card is released (still warm for next time)")
+        kill("shimd")
+        sh(["pkill", "-f", "pascal/shimd.py"], check=False)       # also one started by hand
+        for _ in range(50):
+            if not shimd_info():
+                break
+            time.sleep(0.1)
+        say("driver server stopped; the card is released (still warm for next time)")
 
 
 def cmd_logs(a):

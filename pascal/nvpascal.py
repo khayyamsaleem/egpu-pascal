@@ -61,6 +61,7 @@ assert H_PB + NSLOT * PB_SLOT <= H_CB and H_CB + NSLOT * CB_SLOT <= H_STAGE
 PROF = bool(os.environ.get("NVPASCAL_PROF"))                 # per-kernel GPU time (two timestamps/launch)
 DATA_VA0 = 0x100000000                     # buffers live above 4 GiB of VA
 DATA_PA0 = 0x40000000                      # and above 1 GiB of VRAM (clear of WPR2 @ 0x18040000)
+HOSTMAP_VA0 = 0x800000000                  # alloc_host mappings
 
 
 class Buffer:
@@ -126,7 +127,7 @@ class Device:
         self.moddata_off = 0
         self.icache_dirty = True
         self.seq = 0x100
-        self.va_next = DATA_VA0
+        self.va_next = HOSTMAP_VA0                # host buffers (alloc_host): bump VA above the data range
         self.allocs = []                        # (va, size, Buffer), sorted by va
         self._submit(compute.compute_state(TLS_VA, TLS_PER_SM, CODE_VA), "compute state")
         self._host_ring_init()
@@ -318,12 +319,18 @@ class Device:
         return va
 
     def alloc(self, size, zero=False):
+        """VRAM buffer. Its VA is its PA plus a constant, so reused VRAM reuses its page tables
+        (a fresh VA per allocation exhausted the page-table heap after ~15k llama.cpp allocations)."""
         size = nvmmu.align(size, 0x1000)
         pa = self.data_heap.alloc(size, 0x200000 if size >= 0x200000 else 0x1000)
-        va = self._va(size)
+        va = DATA_VA0 + (pa - DATA_PA0)
         if zero:
             self.c.vram_write(pa, bytes(size))
-        self.ch.vmm.map(va, pa, size)
+        try:
+            self.ch.vmm.map(va, pa, size)
+        except BaseException:
+            self.data_heap.free(pa)
+            raise
         buf = Buffer(self, va, pa, size)
         self.allocs.append((va, size, buf))
         self.allocs.sort(key=lambda t: t[0])
