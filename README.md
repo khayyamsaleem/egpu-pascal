@@ -99,6 +99,7 @@ ns = dev.launch(k, (32, 1, 1), (128, 1, 1), struct.pack("<QQQI", a.va, b.va, c.v
 | `maxpatch/` | the local MAX patches for sm_61 (and the `w8_linear` int8 custom-op kernel) + their installer |
 | `tools/nvclass`, `tools/nvkm`, `tools/mesa` | vendored references (MIT): NVIDIA class/QMD headers, nouveau, Mesa |
 | `docs/` | the chronological evidence trail and per-session handoffs |
+| `docs/upstream/` | what was sent to Modular and tinygrad (issues, draft PRs, the exact diffs) and why the rest stays local |
 | `logs/` | hardware output cited by RESULTS.md and the docs |
 | `probes/phase0/` | the first read-only probes and RT-0/RT-1 microcode tests |
 | `PLAN.md` | the plan of record (phases, routes, odds) |

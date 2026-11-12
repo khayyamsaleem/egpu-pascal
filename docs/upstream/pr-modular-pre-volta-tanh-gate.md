@@ -17,3 +17,7 @@ At the top of `_tanh`, when the target is `sm_52`/`sm_60`/`sm_61`/`sm_70`, retur
 - This file is byte-identical between `main` and the nightly revision the change was built and run with (`b786047492`), so this diff is exactly what was tested - not a rebase.
 
 `Assisted-by: Hermes Agent (AI); reviewed by the author`
+
+---
+
+_Draft: Modular's AI Tool Use Policy asks the author to review AI-assisted changes before they are submitted for review. This one is a draft for exactly that reason; the diff is the whole change._

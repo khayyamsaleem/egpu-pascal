@@ -16,3 +16,7 @@ Add a comptime `nvidia_no_tensor_cores` (NVIDIA target, `compute < 7.0`) and add
 - Caveat: that run was against the pinned nightly revision (`2841b316`), where this file differs slightly from `main`; the patch here was rebased onto `main`'s file and only the two anchors above changed, so it has not been compiled on `main` itself. If you'd rather express the condition as "target is Maxwell/Pascal" than `compute < 7.0`, that also works - `compute < 7.0` is what was tested.
 
 `Assisted-by: Hermes Agent (AI); reviewed by the author`
+
+---
+
+_Draft: Modular's AI Tool Use Policy asks the author to review AI-assisted changes before they are submitted for review. This one is a draft for exactly that reason; the diff is the whole change._

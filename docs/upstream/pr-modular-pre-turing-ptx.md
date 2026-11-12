@@ -25,3 +25,7 @@ Four `+ptx50` -> `+ptx63` in `max/mojo/max/_plugin/cuda/targets.mojo`, for `_gtx
 - `sm_52`/`sm_60`: ptxas check only (above). We have no Maxwell or P100 hardware, so I can't claim more than "ptxas accepts the same version it accepts for sm_61".
 
 `Assisted-by: Hermes Agent (AI); reviewed by the author`
+
+---
+
+_Draft: Modular's AI Tool Use Policy asks the author to review AI-assisted changes before they are submitted for review. This one is a draft for exactly that reason; the diff is the whole change._

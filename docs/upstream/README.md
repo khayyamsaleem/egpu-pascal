@@ -12,25 +12,33 @@ Drafts live here so the text can be reviewed before it goes anywhere.
 | [Kernel panic on wake from sleep while a TinyGPU client holds the card](discussion-tinygrad-sleep-panic.md) | tinygrad/tinygrad | [discussion #19322](https://github.com/tinygrad/tinygrad/discussions/19322); tinygrad/tinygpu_releases is the tracker for the app/dext |
 
 The FLR fix in PR #19323 was verified with a simulation against tinygrad's own autogen register maps
-(`nvsim.py` output in the PR): unpatched, an `architecture = 0x13` chip gets a FLR and then `KeyError: 19`;
+(`nvsim.py` output is in the PR): unpatched, an `architecture = 0x13` chip gets a FLR and then `KeyError: 19`;
 patched, it gets `RuntimeError: unsupported chip architecture 0x13` and no reset; `0x17`/`0x19` are unchanged.
 It has not been run against the card, because pointing that driver at the card is what triggers the FLR.
 
-## Prepared, not submitted
+## Modular patches: open as drafts
 
-Three patches to modular/modular, held for review before submission - Modular's
+Three patches to modular/modular, opened as **draft** PRs - Modular's
 [AI Tool Use Policy](https://github.com/modular/modular/blob/main/AI_TOOL_POLICY.md) requires the human
-author to review AI-assisted changes before a PR is opened, and labels them with `Assisted-by:`.
+author to review AI-assisted changes before they are submitted for review, and labels them with `Assisted-by:`.
 
-| Patch | Diff | PR body | Notes |
+| Patch | Draft PR | Diff | PR body |
 |---|---|---|---|
-| Pre-Turing PTX version (`+ptx50` -> `+ptx63`, 4 targets) | `pr-modular-pre-turing-ptx.diff` | `pr-modular-pre-turing-ptx.md` | fixes issue #7573; sm_61 verified on the card, sm_52/sm_60 ptxas-only |
-| Tensor-core block out of pre-Volta modules | `pr-modular-pre-volta-matmul-gate.diff` | `pr-modular-pre-volta-matmul-gate.md` | the local patch (0001) minus our shim-specific cuBLAS hunk; verified on the pinned nightly, rebased onto `main` |
-| Generic `tanh` where `tanh.approx` is unavailable | `pr-modular-pre-volta-tanh-gate.diff` | `pr-modular-pre-volta-tanh-gate.md` | the file is identical on `main` and on the nightly it was verified against, so this diff is exactly what ran |
+| Pre-Turing PTX version (`+ptx50` -> `+ptx63`, 4 targets) | [#7575](https://github.com/modular/modular/pull/7575) | `pr-modular-pre-turing-ptx.diff` | `pr-modular-pre-turing-ptx.md` |
+| Tensor-core block out of pre-Volta modules | [#7576](https://github.com/modular/modular/pull/7576) | `pr-modular-pre-volta-matmul-gate.diff` | `pr-modular-pre-volta-matmul-gate.md` |
+| Generic `tanh` where `tanh.approx` is unavailable | [#7577](https://github.com/modular/modular/pull/7577) | `pr-modular-pre-volta-tanh-gate.diff` | `pr-modular-pre-volta-tanh-gate.md` |
 
-`make_diffs.py` regenerates the three diffs from current `main` (it fetches each file, asserts the
-anchors, and writes the diff). All three apply cleanly to `main` as of 2026-11-12.
+Each references #7573 and carries `Assisted-by: Hermes Agent (AI); reviewed by the author`. To move one
+forward: read the diff, then "Ready for review".
 
-Not being sent: `maxpatch`'s in-place byte patch of the shipped `.mojoc` packages (the general fix is the
-first PR), the libcuda/NVML/cudart/cublas shims, `sleepguard`, and `pascal/` itself - see
-`../../README.md` for why each of those is local.
+Verified remote state (2026-11-12): all three `isDraft=true`, `fix-*` -> `main`, one file each - #7575
+`+4/-4` (4 `+ptx63`, no `+ptx50` left), #7576 `+8/-0` (`nvidia_no_tensor_cores` in both the guard and the
+condition), #7577 `+12/-0` (`_tanh_impl` import + call).
+
+`make_diffs.py` regenerates the three diffs from current `main` (it fetches each file, asserts the anchors,
+and writes the diff); `open_modular_prs.py` submits them (fork -> branch -> Contents API commit -> draft PR)
+and is re-runnable.
+
+Not being sent: `maxpatch`'s in-place byte patch of the shipped `.mojoc` packages (the general fix is #7575),
+the libcuda/NVML/cudart/cublas shims, `sleepguard`, and `pascal/` itself - see `../../README.md` for why each
+of those is local.
