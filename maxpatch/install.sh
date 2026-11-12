@@ -15,7 +15,9 @@
 #      max/kernels/src/<pkg>/...  -> mojo precompile <pkg> (over <pkg>.mojoc)
 #      max/python/max/<file>      -> copied over site-packages/max/<file>
 #    Every replaced file is kept as <file>.orig.
-# 3. clear the MAX/Mojo caches so nothing compiled for the old target or code is reused.
+# 3. kernels/w8 (the w8_linear custom op behind MAX's int8 path on NVIDIA, patch 0004) is copied
+#    to site-packages/max/_maxpatch_kernels/w8 (removed by --revert).
+# 4. clear the MAX/Mojo caches so nothing compiled for the old target or code is reused.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 VER=$(python3 -c 'from importlib.metadata import version; print(version("modular"))')
@@ -33,6 +35,7 @@ if [ "${1:-}" = "--revert" ]; then
     for f in "$LIB"/*.mojoc.orig $(find "$SITE/max" -name '*.py.orig'); do
         [ -e "$f" ] && cp -p "$f" "${f%.orig}" && echo "restored ${f%.orig}"
     done
+    rm -rf "$SITE/max/_maxpatch_kernels"
     clear_caches; exit 0
 fi
 
@@ -60,6 +63,8 @@ done
 for f in $(echo "$FILES" | sed -n 's#^max/python/max/##p'); do
     backup "$SITE/max/$f"; cp "$SRC/max/python/max/$f" "$SITE/max/$f"; echo "installed $SITE/max/$f"
 done
+rm -rf "$SITE/max/_maxpatch_kernels"; mkdir -p "$SITE/max/_maxpatch_kernels"
+cp -r "$HERE/kernels/w8" "$SITE/max/_maxpatch_kernels/w8"; echo "installed $SITE/max/_maxpatch_kernels/w8"
 python3 "$HERE/patch_target.py"     # last: a std rebuilt from source carries the +ptx50 original
 clear_caches
 echo "maxpatch: modular $VER done"

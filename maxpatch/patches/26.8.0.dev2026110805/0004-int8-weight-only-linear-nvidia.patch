@@ -1,0 +1,175 @@
+diff --git a/max/python/max/nn/_graph_ops/quant.py b/max/python/max/nn/_graph_ops/quant.py
+index fbf5cee1d8..9831f96c0c 100644
+--- a/max/python/max/nn/_graph_ops/quant.py
++++ b/max/python/max/nn/_graph_ops/quant.py
+@@ -558,6 +558,49 @@ def _matmul_float8(
+     )
+ 
+ 
++def _w8_linear_gpu(
++    x: TensorValue,
++    weight: TensorValue,
++    weight_scale: TensorValue,
++    bias: TensorValue | None = None,
++) -> TensorValue:
++    """Weight-only int8 (W8A16) x @ weight.T on GPUs without the Apple int8 MMA (maxpatch).
++
++    The ``w8_linear`` custom op (maxpatch/kernels/w8, installed beside this package or found
++    via $MAX_W8_KERNELS) streams the int8 weights and dequantizes in registers: activations
++    stay bf16, so this is weight-only int8 with the same per-output-channel scales.
++    """
++    import os
++    from pathlib import Path
++
++    from max.graph import Graph, TensorType
++
++    g = Graph.current
++    if not getattr(g, "_maxpatch_w8_loaded", False):
++        pkg = os.environ.get("MAX_W8_KERNELS") or str(
++            Path(__file__).resolve().parents[2] / "_maxpatch_kernels" / "w8"
++        )
++        g._import_kernels([Path(pkg)])
++        g._maxpatch_w8_loaded = True
++    k = x.shape[-1]
++    n = weight.shape[0]
++    x2 = x if x.rank == 2 else ops.reshape(x, (-1, k))
++    if x2.dtype != DType.bfloat16:
++        x2 = ops.cast(x2, DType.bfloat16)
++    scale = ops.cast(ops.reshape(weight_scale, (n,)), DType.float32)
++    out = ops.custom(
++        "w8_linear",
++        device=x.device,
++        values=[x2, weight, scale],
++        out_types=[TensorType(DType.bfloat16, [x2.shape[0], n], device=x.device)],
++    )[0].tensor
++    if bias is not None:
++        out = out + bias
++    if x.rank != 2:
++        out = ops.reshape(out, (*x.shape[:-1], n))
++    return out
++
++
+ def _matmul_int8(
+     x: TensorValue,
+     weight: TensorValue,
+@@ -582,6 +625,8 @@ def _matmul_int8(
+         The output tensor in bf16, shape ``[M, N]``.
+     """
+     if not _is_apple_gpu():
++        if x.device is not None and x.device.is_gpu():
++            return _w8_linear_gpu(x, weight, weight_scale, bias)
+         raise NotImplementedError(
+             "int8 W8A8 dense matmul is only implemented for Apple M5 GPUs"
+         )
+diff --git a/max/python/max/pipelines/architectures/gemma4/model.py b/max/python/max/pipelines/architectures/gemma4/model.py
+index fcb164097a..24b468c3a6 100644
+--- a/max/python/max/pipelines/architectures/gemma4/model.py
++++ b/max/python/max/pipelines/architectures/gemma4/model.py
+@@ -23,6 +23,7 @@ from typing import Any, ClassVar, cast
+ import numpy as np
+ import numpy.typing as npt
+ from max import tree
++from max.dtype import DType
+ from max._artifact.vision import (
+     AspectRatioPreserving,
+     ModalityLayout,
+@@ -83,6 +84,35 @@ logger = logging.getLogger("max.pipelines")
+ _COMPILE_GROUP = "gemma4"
+ 
+ 
++def _int8_quantize_declared(
++    language_model: Gemma4TextModel, state_dict: Mapping[str, WeightData]
++) -> Mapping[str, WeightData]:
++    """maxpatch (MAX_GEMMA4_INT8=1): RTN-quantize the bf16 weights of every Linear the model
++    configured for int8, rowwise symmetric absmax/127, adding their ``.weight_scale``."""
++    from max.nn.legacy.linear import Linear
++    from max.pipelines.architectures.flux2.weight_adapters import (
++        _bf16_weightdata_to_fp32,
++        _quantize_fp32_to_int8_rowwise,
++    )
++
++    targets = {
++        name
++        for name, weight, layer in language_model._iter_named_weights()
++        if isinstance(layer, Linear)
++        and weight is layer.weight
++        and layer.quant_config is not None
++        and layer.quant_config.is_int8_w8a8
++    }
++    if not targets:
++        return state_dict
++    out = dict(state_dict)
++    for key in targets:
++        v = state_dict.get(key)
++        if v is not None and v.dtype != DType.int8:
++            out.update(_quantize_fp32_to_int8_rowwise(_bf16_weightdata_to_fp32(v), key))
++    return out
++
++
+ def _declared_weights(
+     language_model: Gemma4TextModel, state_dict: Mapping[str, WeightData]
+ ) -> dict[str, WeightData]:
+@@ -121,6 +151,7 @@ def language_spec(
+     language_model = Gemma4TextModel(config)
+     if stage is not None:
+         state_dict = _declared_weights(language_model, state_dict)
++    state_dict = _int8_quantize_declared(language_model, state_dict)
+     language_model.load_state_dict(
+         state_dict, weight_alignment=1, strict=strict
+     )
+@@ -490,6 +521,7 @@ class Gemma3_MultiModalModel(
+         language_model = Gemma4TextModel(config)
+         if config.layer_ids is not None:
+             state_dict = _declared_weights(language_model, state_dict)
++        state_dict = _int8_quantize_declared(language_model, state_dict)
+         language_model.load_state_dict(
+             state_dict,
+             weight_alignment=1,
+diff --git a/max/python/max/pipelines/architectures/gemma4/model_config.py b/max/python/max/pipelines/architectures/gemma4/model_config.py
+index 03523a0b98..0e4c556359 100644
+--- a/max/python/max/pipelines/architectures/gemma4/model_config.py
++++ b/max/python/max/pipelines/architectures/gemma4/model_config.py
+@@ -14,6 +14,8 @@
+ 
+ from __future__ import annotations
+ 
++import os
++
+ from dataclasses import dataclass
+ from typing import ClassVar
+ 
+@@ -821,6 +823,34 @@ class Gemma4ForConditionalGenerationConfig(
+             ignored_modules_prefix="model.language_model.",
+         )
+ 
++        if quant_config is None and os.environ.get("MAX_GEMMA4_INT8", "0") == "1":
++            # maxpatch: RTN int8 weights (per output channel) for every projection, quantized
++            # at load (model.py) and run by the w8_linear kernel on pre-Turing NVIDIA GPUs.
++            from max.nn.quant_config import (
++                InputScaleSpec, QuantConfig, QuantFormat, ScaleGranularity, ScaleOrigin, WeightScaleSpec,
++            )
++
++            # Every graph built from here on (including grouped compiles) loads the w8_linear
++            # kernels: register them in MAX's process-wide custom-extension overlay.
++            from pathlib import Path
++
++            import max.graph.graph as _graph_mod
++
++            w8 = Path(os.environ.get("MAX_W8_KERNELS") or Path(_graph_mod.__file__).resolve().parents[1] / "_maxpatch_kernels" / "w8")
++            if w8 not in _graph_mod._default_custom_extensions:
++                _graph_mod._default_custom_extensions = (*_graph_mod._default_custom_extensions, w8)
++
++            layers = set(range(hf_text_config.num_hidden_layers))
++            quant_config = QuantConfig(
++                input_scale=InputScaleSpec(granularity=ScaleGranularity.COLWISE, origin=ScaleOrigin.DYNAMIC,
++                                           dtype=DType.float32),
++                weight_scale=WeightScaleSpec(granularity=ScaleGranularity.ROWWISE, dtype=DType.float32),
++                mlp_quantized_layers=layers,
++                attn_quantized_layers=layers,
++                embedding_output_dtype=DType.bfloat16,
++                format=QuantFormat.INT8_W8A8,
++            )
++
+         for k, v in state_dict.items():
+             if k.endswith("layers.0.input_layernorm.weight"):
+                 self.unquantized_dtype = v.dtype
