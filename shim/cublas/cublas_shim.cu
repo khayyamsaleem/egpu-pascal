@@ -72,7 +72,47 @@ __global__ void __launch_bounds__(256) gemm(int m, int n, int k, float alpha,
         }
 }
 
+// Batched triangular solve (ggml SOLVE_TRI): op(A) X = alpha B (left) or X op(A) = alpha B (right),
+// B overwritten by X. Rows (right) or columns (left) of X are independent: one thread each, plain
+// substitution over the triangle (ggml's systems are <= a few hundred wide).
+__global__ void trsm_batched(int left, int upper, int trans, int unit, int m, int n, float alpha,
+                             const float *const *Aa, int lda, float *const *Ba, int ldb) {
+    const float *A = Aa[blockIdx.y];
+    float *B = Ba[blockIdx.y];
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int dim = left ? m : n;                                     // order of the triangle
+    if (t >= (left ? n : m)) return;
+    bool up = upper != trans;                                  // op(A) = A^T swaps the triangle
+#define T(r, c) (trans ? A[(c) + (size_t)(r) * lda] : A[(r) + (size_t)(c) * lda])
+#define X(i) (left ? B[(i) + (size_t)t * ldb] : B[t + (size_t)(i) * ldb])
+    // left: T x = b (x a column); right: x T = b (x a row, so the triangle is read by columns)
+    bool forward = left ? !up : up;
+    for (int s = 0; s < dim; s++) {
+        int j = forward ? s : dim - 1 - s;
+        float v = alpha * X(j);
+        for (int r = 0; r < s; r++) {
+            int k = forward ? r : dim - 1 - r;
+            v -= left ? T(j, k) * X(k) : X(k) * T(k, j);
+        }
+        X(j) = unit ? v : v / T(j, j);
+    }
+#undef X
+#undef T
+}
+
 struct handle { cudaStream_t stream; cublasMath_t math; };
+
+static cublasStatus_t trsm(cublasSideMode_t side, cublasFillMode_t uplo, cublasOperation_t trans, cublasDiagType_t diag,
+                           int m, int n, float alpha, const float *const A[], int lda, float *const B[], int ldb, int batch) {
+    if (m <= 0 || n <= 0 || batch <= 0) return CUBLAS_STATUS_SUCCESS;
+    int indep = side == CUBLAS_SIDE_LEFT ? n : m;
+    for (int z0 = 0; z0 < batch; z0 += 65535) {
+        dim3 g((indep + 127) / 128, batch - z0 < 65535 ? batch - z0 : 65535);
+        trsm_batched<<<g, 128>>>(side == CUBLAS_SIDE_LEFT, uplo == CUBLAS_FILL_MODE_UPPER, trans != CUBLAS_OP_N,
+                                 diag == CUBLAS_DIAG_UNIT, m, n, alpha, A + z0, lda, B + z0, ldb);
+    }
+    return cudaGetLastError() == cudaSuccess ? CUBLAS_STATUS_SUCCESS : CUBLAS_STATUS_EXECUTION_FAILED;
+}
 
 template <typename TA, typename TB, typename TC>
 static cublasStatus_t run(cublasOperation_t ta, cublasOperation_t tb, int m, int n, int k, float alpha,
@@ -151,6 +191,12 @@ cublasStatus_t cublasSgemmBatched(cublasHandle_t h, cublasOperation_t ta, cublas
     return run<float, float, float>(ta, tb, m, n, k, *alpha, NULL, lda, 0, (const void *const *)Aa, NULL, ldb, 0,
                                     (const void *const *)Ba, *beta, NULL, ldc, 0, (void *const *)Ca, batch);
 }
+cublasStatus_t cublasStrsmBatched(cublasHandle_t h, cublasSideMode_t side, cublasFillMode_t uplo,
+                                  cublasOperation_t trans, cublasDiagType_t diag, int m, int n, const float *alpha,
+                                  const float *const A[], int lda, float *const B[], int ldb, int batch) {
+    return trsm(side, uplo, trans, diag, m, n, *alpha, A, lda, B, ldb, batch);
+}
+
 cublasStatus_t cublasGemmEx(cublasHandle_t h, cublasOperation_t ta, cublasOperation_t tb, int m, int n, int k,
                             const void *alpha, const void *A, cudaDataType at, int lda, const void *B, cudaDataType bt, int ldb,
                             const void *beta, void *C, cudaDataType ct, int ldc, cublasComputeType_t comp, cublasGemmAlgo_t algo) {
