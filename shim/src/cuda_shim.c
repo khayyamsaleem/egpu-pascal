@@ -231,6 +231,9 @@ static int is_dev_ptr(uint64_t p) {
     return hit;
 }
 
+/* For shim/cudart (cudaMemcpyDefault, cudaPointerGetAttributes). */
+int shim_is_device_pointer(unsigned long long p) { return is_remote() && is_dev_ptr(p); }
+
 static CUresult dev_alloc(CUdeviceptr *p, size_t n, const char *who) {
     if (is_remote()) {
         uint64_t sz = n, va = 0; void *out = &va; uint32_t got;
@@ -345,7 +348,7 @@ CUresult cuMemsetD32_v2(CUdeviceptr d, unsigned v, size_t n) { return dmemset(d,
 CUresult cuMemsetD32Async(CUdeviceptr d, unsigned v, size_t n, CUstream s) { return dmemset(d, v, 4, n); }
 
 /* ------------------------------------------------------------------ modules / launch */
-#define MAXP 64
+#define MAXP 256                 /* params per kernel (ggml's flash-attention kernels have ~40) */
 struct fn { char name[512]; int mod, idx, regs, shared, nparam; uint16_t off[MAXP], size[MAXP]; };
 struct mod { int id, nfn; struct fn *fns; };
 static int n_modules;

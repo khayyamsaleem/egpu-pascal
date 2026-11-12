@@ -26,7 +26,9 @@ import gr as grmod
 import grctx as grctxmod
 import grchan, cubin as cubinmod, compute, faults, fb
 
-CODE_VA, CODE_SIZE = 0x04000000, 0x2000000  # 32 MiB: MAX loads one module per kernel
+# Program region: 240 MiB at a fixed VRAM range (MAX loads one module per kernel; llama.cpp's
+# translation units are MBs each). Not zero-filled; code is uploaded through the staging ring.
+CODE_VA, CODE_PA, CODE_SIZE = 0x40000000, 0x31000000, 0x0f000000
 STUB_OFF, CODE_OFF0 = 0x0, 0x100             # code offset 0: shared stubs (vprintf -> ret)
 STUB_SYMBOLS = ("vprintf",)                  # externals resolved to the ret stub
 # Thread-local memory (stack, spills), sized like Mesa nvc0_screen_resize_tls_area(128*16, 0, cstack):
@@ -90,7 +92,7 @@ class Device:
             raise RuntimeError("GR not up: run pascal/reset_engines.py + pascal/gr.py")
         self.g = grmod.GR(c).oneinit(verbose=verbose)
         heap = nvmmu.VramHeap(base=0x11000000, limit=0x18000000)      # channel + ctx, below WPR2
-        self.data_heap = nvmmu.VramHeap(base=DATA_PA0)
+        self.data_heap = nvmmu.FreeListHeap(base=DATA_PA0)
         self.f = fifomod.Fifo(c); self.f.init(verbose=verbose)
         devs = {d["name"]: d for d in fb.top_parse(c)}
         for d in devs.values():                 # all engines on GR's runlist out of reset
@@ -105,7 +107,8 @@ class Device:
         try:
             gc = grctxmod.GrCtx(c, self.g, heap)
             self.ch = ch = grchan.GRChannel(self.f, chid=1, gc=gc)
-            self.code_pa = ch.alloc_map(CODE_VA, CODE_SIZE)
+            self.code_pa = CODE_PA
+            ch.vmm.map(CODE_VA, CODE_PA, CODE_SIZE, flush=False)
             ch.vmm.map(TLS_VA, TLS_PA, TLS_PER_SM * TLS_SMS, flush=False)
             ch.vmm.map(MODDATA_VA, MODDATA_PA, MODDATA_SIZE, flush=False)
             self.sem_pa = ch.alloc_map(SEM_VA, 0x1000)
@@ -225,6 +228,8 @@ class Device:
         hv = self.hv
         lmem = k.get("lmem", 0)
         cb = compute.cbuf0(k, grid, block, params, stack=lmem, windows=(SHARED_WINDOW, LOCAL_WINDOW))
+        if len(cb) % 16:                           # params need not end on a word (ggml: 117 bytes)
+            cb += bytes(16 - len(cb) % 16)
         if len(cb) > CB_SLOT:
             raise ValueError("%s: constant bank 0 needs %#x bytes (params %#x), slot is %#x"
                              % (k["name"], len(cb), len(params), CB_SLOT))
@@ -335,11 +340,12 @@ class Device:
         raise KeyError("device address %#x is not inside any allocation" % va)
 
     def free(self, va):
-        """Unmap; VRAM is not recycled yet (bump heap) -- MAX allocates one pool."""
+        """Unmap and return the VRAM to the heap (the VA is not reused)."""
         self.drain()                            # queued kernels may still use it
         for i, (base, size, buf) in enumerate(self.allocs):
             if base == va:
                 self.ch.vmm.unmap(va, size)
+                self.data_heap.free(buf.pa)
                 del self.allocs[i]
                 return
         raise KeyError("free of unknown address %#x" % va)
@@ -408,8 +414,9 @@ class Device:
                 raise NotImplementedError("relocation type %d (%r in %s)" % (typ, sname, target))
             A = struct.unpack_from(fmt, img, roff)[0] if addend is None else addend
             struct.pack_into(fmt, img, roff, (S + A) & (0xffffffff if typ == 1 else (1 << 64) - 1))
+        put = self.htod if hasattr(self, "k_xcopy") else (lambda va, d: self.c.vram_write(va - CODE_VA + CODE_PA if va >= CODE_VA else MODDATA_PA + (va - MODDATA_VA), d))
         for n, va in sec_va.items():
-            self.c.vram_write(MODDATA_PA + (va - MODDATA_VA), bytes(images[n]))
+            put(va, bytes(images[n]))
         def banks_for(kernel):                         # module-level banks + the kernel's own
             b = {}
             for n, (num, owner) in kbank.items():
@@ -419,7 +426,7 @@ class Device:
             return b
         for name, k in ks.items():
             k["code"] = bytes(images[".text." + name])
-            self.c.vram_write(self.code_pa + k["prog_off"], k["code"])
+            put(CODE_VA + k["prog_off"], k["code"])
             need = max(k["frame"], k["min_stack"], k["max_stack"])
             assert need <= LMEM_MAX - 0x100, "%s needs %d bytes of local memory per thread" % (name, need)
             k["lmem"] = 0 if not need else nvmmu.align(need, 0x10) + 0x100   # + slack for callees

@@ -221,7 +221,7 @@ class Server:
                 for va in list(owned):
                     self.free(struct.pack("<Q", va), owned)
                 if not self.dev.allocs:                  # nothing live: rewind the bump heaps
-                    self.dev.data_heap = nvpascal.nvmmu.VramHeap(base=nvpascal.DATA_PA0)
+                    self.dev.data_heap = nvpascal.nvmmu.FreeListHeap(base=nvpascal.DATA_PA0)
                     self.dev.va_next = nvpascal.DATA_VA0
                     self.used = 0
                 self.active -= 1

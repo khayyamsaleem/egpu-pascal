@@ -1,0 +1,4 @@
+#!/bin/sh
+# Serve LLMs on the GTX 1080 Ti eGPU: see localgpu/local_gpu.py (`local-gpu --help`).
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+exec python3 "$here/localgpu/local_gpu.py" "$@"

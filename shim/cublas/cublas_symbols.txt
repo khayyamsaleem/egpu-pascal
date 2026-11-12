@@ -1,0 +1,13 @@
+cublasCreate_v2
+cublasDestroy_v2
+cublasGemmBatchedEx
+cublasGemmEx
+cublasGemmStridedBatchedEx
+cublasGetStatusString
+cublasSetMathMode
+cublasSetStream_v2
+cublasSetWorkspace_v2
+cublasSgemmBatched
+cublasSgemmStridedBatched
+cublasSgemm_v2
+cublasStrsmBatched

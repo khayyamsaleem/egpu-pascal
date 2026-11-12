@@ -1,0 +1,12 @@
+cublasLtCreate
+cublasLtDestroy
+cublasLtMatmul
+cublasLtMatmulAlgoGetHeuristic
+cublasLtMatmulDescCreate
+cublasLtMatmulDescDestroy
+cublasLtMatmulDescSetAttribute
+cublasLtMatmulPreferenceCreate
+cublasLtMatmulPreferenceDestroy
+cublasLtMatrixLayoutCreate
+cublasLtMatrixLayoutDestroy
+cublasLtMatrixLayoutSetAttribute

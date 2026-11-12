@@ -123,6 +123,46 @@ def align(x, a):
     return (x + a - 1) & ~(a - 1)
 
 
+class FreeListHeap:
+    """First-fit allocator with coalescing over [base, limit): VRAM for data buffers, which
+    llama.cpp frees and reallocates (compute buffers grow during graph reservation)."""
+
+    def __init__(self, base, limit=0x2b0000000):
+        self.base, self.limit = base, limit
+        self.free_list = [(base, limit - base)]       # sorted, non-adjacent (addr, size)
+        self.used = {}                                 # addr -> size
+
+    def alloc(self, size, align_to=0x1000):
+        for i, (a, n) in enumerate(self.free_list):
+            s = align(a, align_to)
+            if s + size <= a + n:
+                rest = []
+                if s > a:
+                    rest.append((a, s - a))
+                if s + size < a + n:
+                    rest.append((s + size, a + n - s - size))
+                self.free_list[i:i + 1] = rest
+                self.used[s] = size
+                return s
+        raise AssertionError("VRAM heap exhausted: no free block of %#x bytes (largest %#x)"
+                             % (size, max([n for _, n in self.free_list] or [0])))
+
+    def free(self, addr):
+        size = self.used.pop(addr)
+        import bisect
+        i = bisect.bisect_left(self.free_list, (addr, 0))
+        self.free_list.insert(i, (addr, size))
+        j = max(i - 1, 0)                              # coalesce with the neighbours
+        while j + 1 < len(self.free_list):
+            a, n = self.free_list[j]; b, m = self.free_list[j + 1]
+            if a + n == b:
+                self.free_list[j:j + 2] = [(a, n + m)]
+            elif j >= i:
+                break
+            else:
+                j += 1
+
+
 class VramHeap:
     """Bump allocator over physical VRAM owned by the driver.
 

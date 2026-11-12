@@ -17,3 +17,5 @@ tools/envytools/
 # shim build outputs and capture scratch
 shim/build/
 shim/captured/
+shim/build-cuda12/
+shim/cudart/fbtest.cu
