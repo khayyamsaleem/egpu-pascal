@@ -4,13 +4,20 @@ A from-scratch, user-space bring-up of an **NVIDIA GTX 1080 Ti (GP102, Pascal)**
 Thunderbolt enclosure on an **Apple Silicon MacBook Air**. It needs no NVIDIA driver and
 runs over tinygrad's TinyGPU DriverKit transport.
 
-**Status (2026-11-09):** the card POSTs from macOS, secure-boots its graphics firmware,
+**Status (2026-11-12):** the card POSTs from macOS, secure-boots its graphics firmware,
 and runs **ptxas-compiled sm_61 CUDA kernels** dispatched through our own channel/QMD code.
-**Modular MAX runs LLMs on it** through a libcuda/NVML shim and local MAX patches
-([`maxpatch/`](maxpatch/)): SmolLM2-135M (fp32, text identical to MAX-on-CPU, 6.6 tok/s)
-and **Gemma 4 E2B** (bf16 on the MAX nightly, "The capital of France is **Paris**." as
-transformers gives, 1.9 tok/s).
-Full results: **[RESULTS.md](RESULTS.md)**.
+Two runtimes reach it through a libcuda/NVML shim over TinyGPU:
+
+* **Modular MAX** (via [`maxpatch/`](maxpatch/)): SmolLM2-135M fp32 (text identical to
+  MAX-on-CPU) and **Gemma 4 E2B** bf16 — "The capital of France is **Paris**." as transformers
+  gives it, and 200 ms/token since launches became asynchronous (was 529).
+* **llama.cpp** (via `shim/cudart` + `shim/cublas`): SmolLM2-135M Q4_0 at 61 tok/s
+  generation / 447 tok/s prompt, and `test-backend-ops` 10,000+ cases with 0 failures.
+
+[`bin/local-gpu`](localgpu/) brings the whole stack up with one command: card init if it is
+cold, the driver server, the right container, a resumable model download, an Ollama-compatible
+endpoint on `127.0.0.1:11434`, and a terminal chat. Full results: **[RESULTS.md](RESULTS.md)**;
+what is in flight: **[docs/handoffs/HANDOFF-SESSION9.md](docs/handoffs/HANDOFF-SESSION9.md)**.
 
 ```
 rung 0  transport + VBIOS POST from macOS + 11 GB VRAM   DONE
@@ -18,7 +25,7 @@ rung 1  our microcode on a falcon                         DONE
 rung 2  ACR secure boot, FECS/GPCCS running               DONE
 rung 3  MMU v2 + GPFIFO channel + copy engine             DONE
 rung 4  compute dispatch: sm_61 vadd -> host memory        DONE
-rung 5  model inference (MAX): SmolLM2-135M, Gemma 4 E2B  DONE (speed work next)
+rung 5  model inference: MAX (SmolLM2, Gemma 4 E2B), llama.cpp    DONE (quantized weights next)
 ```
 
 Boot clocks only for now: 607 MHz SM, 405 MHz memory (~30 GB/s measured).
@@ -86,8 +93,10 @@ ns = dev.launch(k, (32, 1, 1), (128, 1, 1), struct.pack("<QQQI", a.va, b.va, c.v
 |---|---|
 | `pascal/` | the driver: `card` (BAR0/PRAMIN), `devinit`/`vbios`, `fb`, `mmu`, `acr`/`acr_unload`, `sec2_rtos`, `gr`/`gr_ctxctl`/`grctx`, `fifo`, `grchan`, `compute`, **`nvpascal`** (runtime), `cubin`, `bench`, `fecs_snap`, probes, recovery |
 | `kernels/` | PTX sources, built sm_61 cubins, `Dockerfile` + `build.sh` |
-| `shim/` | `libcuda.so.1` + `libnvidia-ml.so.1` replacements for MAX (Linux container) and their tests |
-| `maxpatch/` | the local MAX 26.6.0 patches for sm_61 and their installer |
+| `shim/` | `libcuda.so.1` + `libnvidia-ml.so.1` replacements for MAX (Linux container), `cudart/` + `cublas/` for llama.cpp, and their tests |
+| `localgpu/` | `local-gpu`: card/stack bring-up, model fetch, Ollama + OpenAI proxy, terminal chat, multi-turn bench |
+| `llama/` | llama.cpp build for sm_61 (`--no-compress`, no VMM, no CUDA graphs) and its container |
+| `maxpatch/` | the local MAX patches for sm_61 (and the `w8_linear` int8 custom-op kernel) + their installer |
 | `tools/nvclass`, `tools/nvkm`, `tools/mesa` | vendored references (MIT): NVIDIA class/QMD headers, nouveau, Mesa |
 | `docs/` | the chronological evidence trail and per-session handoffs |
 | `logs/` | hardware output cited by RESULTS.md and the docs |

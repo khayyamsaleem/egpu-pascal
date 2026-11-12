@@ -60,8 +60,18 @@ docker exec <container> bash /repo/maxpatch/install.sh --revert   # stock instal
 
 ## Not patched yet
 
+* **In flight: int8 weight-only (W8A16) weights — patch `0004` on the 26.8 set.** The
+  `w8_linear` custom op (`kernels/w8`) exists and is benchmarked on the card
+  (`kernels/w8_check.py`: 1.2-2.8x decode, 5.5-11x prefill over MAX's own bf16 `ops.matmul`),
+  and `MAX_GEMMA4_INT8=1` makes the gemma4 config declare INT8_W8A8 projections with
+  load-time RTN quantization — but a model compile still fails with
+  `error: 'mo.custom' op MOToMAP: no kernel registered for 'w8_linear'`, so the kernel package
+  never reaches the pipeline's grouped compile. See `docs/handoffs/HANDOFF-SESSION9.md`.
+  It is what would let Gemma 4 E4B fit on this card.
 * Flash attention for head depth 128 (Llama-3-8B, most Qwen) routes to the tensor-core FA2
   path; it needs `flash_attention_hw_supported` gated like patch 0001. Gemma 4 (256/512) and
   depth-64 models use the naive MHA kernels here and work.
-* Gemma 4 E4B: 9.4 GB of device weights even with PLE on the host, over this card's ~8.8 GiB
-  pool. It needs quantized weights, which MAX's gemma4 doesn't load (bf16/fp16/NVFP4 only).
+* Gemma 4 E4B on MAX: 9.4 GB of device weights even with PLE on the host, over this card's
+  ~8.8 GiB pool. It needs quantized weights, which MAX's gemma4 doesn't load
+  (bf16/fp16/NVFP4 only) — the `w8_linear` path above is the attempt. On llama.cpp instead,
+  the QAT Q4_0 GGUF runs (see `localgpu/`).
