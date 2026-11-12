@@ -1,10 +1,10 @@
-# Warp shuffle on sm_61: needs the PTX 6.3 target (maxpatch/patch_std_target.py).
+# Warp shuffle on sm_61: needs the PTX 6.3 target (maxpatch/patch_target.py).
 # Every lane reads lane 7's value (7*3+1 = 22) and a butterfly sum of the lane ids (496).
 from max.gpu import thread_idx
 from max.gpu.host import DeviceContext
 from max.gpu.primitives.warp import shuffle_idx, shuffle_xor
 
-def k(o: UnsafePointer[Int32, MutAnyOrigin]):
+def k(o: Pointer[Int32, MutAnyOrigin]):
     var t = Int32(thread_idx.x)
     var s = t
     s += shuffle_xor(s, 16)

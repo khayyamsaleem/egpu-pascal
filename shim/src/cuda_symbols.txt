@@ -116,3 +116,6 @@ cuStreamWaitEvent
 cuStreamWaitValue64_v2
 cuTensorMapEncodeIm2col
 cuTensorMapEncodeTiled
+cuDeviceGetUuid
+cuDeviceGetUuid_v2
+cuGraphAddDependencies_v2

@@ -145,6 +145,10 @@ CUresult cuDeviceGet(CUdevice *d, int ord) {
     *d = 0; return CUDA_SUCCESS;
 }
 CUresult cuDeviceGetName(char *name, int len, CUdevice d) { snprintf(name, len, "%s", GP102_NAME); return CUDA_SUCCESS; }
+/* MAX nightly (26.8) asks for the device UUID; any stable 16 bytes do. */
+static const unsigned char GP102_UUID[16] = {'e','g','p','u','-','p','a','s','c','a','l',0x10,0xde,0x1b,0x06,0x01};
+CUresult cuDeviceGetUuid(void *uuid, CUdevice d) { memcpy(uuid, GP102_UUID, 16); return CUDA_SUCCESS; }
+CUresult cuDeviceGetUuid_v2(void *uuid, CUdevice d) { memcpy(uuid, GP102_UUID, 16); return CUDA_SUCCESS; }
 CUresult cuDeviceGetAttribute(int *pi, int attrib, CUdevice d) {
     int ok; *pi = attr_value(attrib, &ok);
     if (ok) LOG("cuDeviceGetAttribute(%d) -> %d", attrib, *pi);
@@ -208,12 +212,29 @@ CUresult cuMemGetInfo_v2(size_t *fr, size_t *tot) {
     *tot = vram_total; *fr = is_remote() ? vram_free : vram_total - allocated;
     LOG("cuMemGetInfo -> free %zu total %zu", *fr, *tot); return CUDA_SUCCESS;
 }
+/* Device ranges handed out by the server (remote mode), so copies that take unified
+ * addresses (cuMemcpyBatchAsync) can tell device from host pointers. */
+static struct { uint64_t va, n; } dev_ranges[1024];
+static int n_dev_ranges;
+static pthread_mutex_t ranges_lk = PTHREAD_MUTEX_INITIALIZER;
+static int is_dev_ptr(uint64_t p) {
+    int hit = 0;
+    pthread_mutex_lock(&ranges_lk);
+    for (int i = 0; i < n_dev_ranges && !hit; i++)
+        hit = p >= dev_ranges[i].va && p < dev_ranges[i].va + dev_ranges[i].n;
+    pthread_mutex_unlock(&ranges_lk);
+    return hit;
+}
+
 static CUresult dev_alloc(CUdeviceptr *p, size_t n, const char *who) {
     if (is_remote()) {
         uint64_t sz = n, va = 0; void *out = &va; uint32_t got;
         int st = shim_rpc(OP_ALLOC, &sz, 8, NULL, 0, &out, &got);
         LOGI("%s(%zu) -> %#llx (status %d)", who, n, (unsigned long long)va, st);
         if (st) return st;
+        pthread_mutex_lock(&ranges_lk);
+        if (n_dev_ranges < 1024) { dev_ranges[n_dev_ranges].va = va; dev_ranges[n_dev_ranges].n = n; n_dev_ranges++; }
+        pthread_mutex_unlock(&ranges_lk);
         *p = va; return CUDA_SUCCESS;
     }
     void *m = aligned_alloc(4096, (n + 4095) & ~4095ull);
@@ -222,7 +243,13 @@ static CUresult dev_alloc(CUdeviceptr *p, size_t n, const char *who) {
     LOG("%s(%zu) -> %#llx [sim]", who, n, *p); return CUDA_SUCCESS;
 }
 static CUresult dev_free(CUdeviceptr p) {
-    if (is_remote()) { uint64_t va = p; return shim_rpc(OP_FREE, &va, 8, NULL, 0, NULL, NULL); }
+    if (is_remote()) {
+        pthread_mutex_lock(&ranges_lk);
+        for (int i = 0; i < n_dev_ranges; i++)
+            if (dev_ranges[i].va == p) { dev_ranges[i] = dev_ranges[--n_dev_ranges]; break; }
+        pthread_mutex_unlock(&ranges_lk);
+        uint64_t va = p; return shim_rpc(OP_FREE, &va, 8, NULL, 0, NULL, NULL);
+    }
     free((void *)(uintptr_t)p); return CUDA_SUCCESS;
 }
 CUresult cuMemAlloc_v2(CUdeviceptr *p, size_t n) { return dev_alloc(p, n, "cuMemAlloc"); }
@@ -287,6 +314,24 @@ CUresult cuMemcpyDtoHAsync_v2(void *d, CUdeviceptr s, size_t n, CUstream st) { r
 CUresult cuMemcpyDtoD_v2(CUdeviceptr d, CUdeviceptr s, size_t n) { return dtod(d, s, n); }
 CUresult cuMemcpyDtoD(CUdeviceptr d, CUdeviceptr s, size_t n) { return dtod(d, s, n); }
 CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr d, CUdeviceptr s, size_t n, CUstream st) { return dtod(d, s, n); }
+/* CUDA 12.8 ABI (the unsuffixed symbol; CUDA 13's 8-argument form is cuMemcpyBatchAsync_v2).
+ * Unified addresses: classify each side against the server's ranges. The attributes are
+ * ordering/location hints; copies here are synchronous and in order, which satisfies them. */
+CUresult cuMemcpyBatchAsync(CUdeviceptr *dsts, CUdeviceptr *srcs, size_t *sizes, size_t count,
+                            void *attrs, size_t *attrs_idxs, size_t num_attrs, size_t *fail_idx,
+                            CUstream st) {
+    LOG("cuMemcpyBatchAsync(%zu copies)", count);
+    for (size_t i = 0; i < count; i++) {
+        int dd = is_remote() && is_dev_ptr(dsts[i]), sd = is_remote() && is_dev_ptr(srcs[i]);
+        CUresult r;
+        if (dd && sd) r = dtod(dsts[i], srcs[i], sizes[i]);
+        else if (dd) r = htod(dsts[i], (const void *)(uintptr_t)srcs[i], sizes[i]);
+        else if (sd) r = dtoh((void *)(uintptr_t)dsts[i], srcs[i], sizes[i]);
+        else { memmove((void *)(uintptr_t)dsts[i], (const void *)(uintptr_t)srcs[i], sizes[i]); r = 0; }
+        if (r) { if (fail_idx) *fail_idx = i; return r; }
+    }
+    return CUDA_SUCCESS;
+}
 CUresult cuMemsetD8_v2(CUdeviceptr d, unsigned char v, size_t n) { return dmemset(d, v, 1, n); }
 CUresult cuMemsetD8Async(CUdeviceptr d, unsigned char v, size_t n, CUstream s) { return dmemset(d, v, 1, n); }
 CUresult cuMemsetD16_v2(CUdeviceptr d, unsigned short v, size_t n) { return dmemset(d, v, 2, n); }
@@ -387,7 +432,7 @@ static CUresult launch(struct fn *f, unsigned gx, unsigned gy, unsigned gz, unsi
         LOGI("launch %s grid %u,%u,%u block %u,%u,%u smem %u [sim: not executed]", f->name, gx, gy, gz, bx, by, bz, smem);
         return CUDA_SUCCESS;
     }
-    unsigned char blob[4096]; uint32_t plen = 0;
+    unsigned char blob[8192]; uint32_t plen = 0;   /* sm_6x allows up to 0x1100 bytes of params */
     memset(blob, 0, sizeof blob);
     for (int i = 0; i < f->nparam; i++) {
         uint32_t o = f->off[i], s = f->size[i];

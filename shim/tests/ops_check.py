@@ -1,14 +1,20 @@
 """Op-level numerics on the GTX 1080 Ti through MAX: each op the SmolLM2 graph uses, at the
 model's shapes (hidden 576, MLP 1536, 35-token prefill and 1-token decode), against numpy.
-Usage (container, shim env set): python ops_check.py [name ...]
+Usage (container, shim env set): python ops_check.py [--dtype float32|bfloat16|float16] [name ...]
 """
-import sys, time
+import argparse, sys, time
 import numpy as np
 from max.driver import Accelerator, Buffer
 from max.dtype import DType
 from max.engine import InferenceSession
 from max.graph import DeviceRef, Graph, TensorType, ops
 
+ap = argparse.ArgumentParser()
+ap.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"])
+ap.add_argument("names", nargs="*")
+args = ap.parse_args()
+DT = getattr(DType, args.dtype)
+TOL = {"float32": 1e-4, "bfloat16": 2e-2, "float16": 4e-3}[args.dtype]
 rng = np.random.default_rng(0)
 dev = Accelerator()
 sess = InferenceSession(devices=[dev])
@@ -19,10 +25,15 @@ def f32(*shape, scale=1.0):
     return (rng.standard_normal(shape) * scale).astype(np.float32)
 
 
-def run(name, inputs, build, ref, tol=1e-4):
+def run(name, inputs, build, ref, tol=None):
+    """inputs are float32/int numpy arrays; float graphs run in --dtype (cast in-graph), output cast back."""
+    tol = tol or TOL
     types = [TensorType(DType.from_numpy(x.dtype), x.shape, device=GPU) for x in inputs]
     with Graph(name, input_types=types) as g:
-        g.output(build(*g.inputs))
+        ins = [ops.cast(v, DT) if x.dtype == np.float32 and DT != DType.float32 else v
+               for v, x in zip(g.inputs, inputs)]
+        out = build(*ins)
+        g.output(ops.cast(out, DType.float32) if out.dtype == DT and DT != DType.float32 else out)
     t0 = time.time()
     model = sess.load(g)
     t1 = time.time()
@@ -60,9 +71,13 @@ tests = {
                            lambda x: np.exp(x - x.max(-1, keepdims=True)) / np.exp(x - x.max(-1, keepdims=True)).sum(-1, keepdims=True)),
     "silu_mul": lambda: run("silu_mul", [f32(T, I), f32(T, I)], lambda a, b: ops.silu(a) * b,
                             lambda a, b: a / (1 + np.exp(-a.astype(np.float64))) * b),
+    "gelu_tanh": lambda: run("gelu_tanh", [f32(T, I)], lambda x: ops.gelu(x, approximate="tanh"),
+                             lambda x: 0.5 * x * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * x.astype(np.float64) ** 3)))),
+    "softcap_tanh": lambda: run("softcap_tanh", [f32(1, 4096, scale=40)], lambda x: ops.tanh(x / 30.0) * 30.0,
+                                lambda x: np.tanh(x.astype(np.float64) / 30) * 30),
     "argmax": lambda: run("argmax", [f32(1, 49152)], lambda x: ops.argmax(x, axis=-1),
                           lambda x: x.argmax(-1)[:, None]),
 }
-names = sys.argv[1:] or list(tests)
+names = args.names or list(tests)
 res = {n: tests[n]() for n in names}
 print("RESULT:", "PASS" if all(res.values()) else "FAIL (%s)" % ", ".join(n for n, v in res.items() if not v))
