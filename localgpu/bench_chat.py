@@ -154,11 +154,14 @@ def main():
         row = dict(turn=i, name=name, context=prompt_tok, new_prompt=new, cached=cached, prefill_tps=round(pf, 1),
                    generated=gen, decode_tps=round(dec, 2), ttft_s=round(r["ttft"], 2), wall_s=round(r["wall"], 2),
                    finish=r["finish"], tool_calls=[tc["function"]["name"] + tc["function"]["arguments"] for tc in r["tool_calls"]],
-                   reply=(r["text"] or "")[:400])
+                   reply=(r["text"] or "")[:400], reasoning=(r["reasoning"] or "")[:400],
+                   has_timings=bool(tm))
         rows.append(row)
         print("%-3d %-14s %7d %7d %7d %7.0f/s %6d %6.1f/s %6.1fs %5.1fs%s" % (
             i, name, prompt_tok, new, cached, pf, gen, dec, r["ttft"], r["wall"],
-            "  -> " + ", ".join(row["tool_calls"]) if row["tool_calls"] else ""), flush=True)
+            ("  -> " + ", ".join(row["tool_calls"])) if row["tool_calls"]
+            else ("  [think: %d chars, no content]" % len(row["reasoning"]) if not row["reply"] and row["reasoning"] else "")),
+              flush=True)
     total = time.perf_counter() - t_start
     gen_total = sum(x["generated"] for x in rows)
     new_total = sum(x["new_prompt"] for x in rows)
@@ -171,7 +174,11 @@ def main():
                    prefill_tps_overall=round(new_total / prefill_time, 1) if prefill_time else 0,
                    ttft_median_s=round(statistics.median(x["ttft_s"] for x in rows), 2) if rows else 0,
                    ttft_max_s=max((x["ttft_s"] for x in rows), default=0),
-                   tool_call_ok=any(x["tool_calls"] for x in rows if x["name"] == "tool-call"))
+                   tool_call_ok=any(x["tool_calls"] for x in rows if x["name"] == "tool-call"),
+                   # a tool-call turn has an empty content field by design, not a spent budget
+                   thinking_turns=sum(1 for x in rows
+                                      if not x["reply"] and x["reasoning"] and x["finish"] != "tool_calls"),
+                   timings_available=any(x["has_timings"] for x in rows))
     print("\n%d turns in %.0f s: %d tokens generated at %.1f tok/s overall; %d prompt tokens processed at %.0f tok/s "
           "(+%d reused from cache); TTFT median %.1f s, max %.1f s; final context %d tokens; tool call %s"
           % (summary["turns"], total, gen_total, summary["decode_tps_overall"], new_total,
@@ -187,6 +194,12 @@ def main():
             f.write("| %d | %s | %d | %d | %d | %.0f | %d | %.1f | %.1f | %.1f |\n" % (
                 x["turn"], x["name"], x["context"], x["new_prompt"], x["cached"], x["prefill_tps"], x["generated"],
                 x["decode_tps"], x["ttft_s"], x["wall_s"]))
+        if not summary["timings_available"]:
+            f.write("\nThis backend returned no timing block: `cached` and `prefill tok/s` are derived only from "
+                    "TTFT (new = whole prompt), so they are not comparable with llama.cpp numbers.\n")
+        if summary["thinking_turns"]:
+            f.write("\n%d turn(s) spent the whole token budget in the model's thinking channel (`reasoning` in the "
+                    "JSON, no visible content).\n" % summary["thinking_turns"])
         f.write("\n" + json.dumps(summary, indent=1) + "\n")
     print("results: %s.{json,md}" % stem)
 

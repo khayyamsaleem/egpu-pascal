@@ -93,7 +93,7 @@ rebuild itself is the only thing verified (`shim/build-cuda12/libcublas.so.12` e
 ```sh
 bin/local-gpu status                    # card, containers, servers
 bin/local-gpu chat                      # serve + terminal chat on the default model
-bin/local-gpu -m gemma4-e2b-max serve   # MAX path (compiles kernels on first start)
+bin/local-gpu serve -m gemma4-e2b-max   # MAX path (compiles kernels on first start)
 docker exec maxnightly bash -lc 'MODEL=google/gemma-4-E2B-it ENCODING=bfloat16 \
     MAX_GEMMA4_ACTIVATION_MIB=1024 MAX_GEMMA4_INT8=1 \
     bash /repo/shim/tests/generate.sh gpu "The capital of France is" --no-prefer-module-v3'

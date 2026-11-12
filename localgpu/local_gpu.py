@@ -283,9 +283,10 @@ def serve(a):
         say("starting max serve: %s (%s), context %d -- compiles kernels on first start" % (name, m["hf"], ctx))
         dexec(MAX_CT, "export LD_LIBRARY_PATH=/repo/shim/build SHIM_MODE=remote SHIM_QUIET=1 SHIM_LOG=/tmp/shim-serve.log "
               "MODULAR_NVPTX_COMPILER_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvcc/bin/ptxas %s; "
-              "exec max serve --model %s --quantization-encoding %s --devices gpu --no-device-graph-capture "
-              "--max-length %d --max-batch-size 1 --host 0.0.0.0 --port %d %s > /tmp/serve.log 2>&1"
-              % (m.get("env", ""), m["hf"], m["encoding"], ctx, MAX_PORT, m.get("extra", "")), detach=True)
+              "exec max serve --model %s --served-model-name %s --quantization-encoding %s --devices gpu "
+              "--no-device-graph-capture --max-length %d --max-batch-size 1 --host 0.0.0.0 --port %d %s "
+              "> /tmp/serve.log 2>&1"
+              % (m.get("env", ""), m["hf"], name, m["encoding"], ctx, MAX_PORT, m.get("extra", "")), detach=True)
         backend, health = max_url(), "/v1/models"
         alive = lambda: not dexec(MAX_CT, "pgrep -f 'max serve' >/dev/null", check=False).returncode
         logcmd = (MAX_CT, "grep -v UserWarning /tmp/serve.log | tail -25")

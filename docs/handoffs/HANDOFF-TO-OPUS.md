@@ -1,51 +1,83 @@
 HANDOFF — GTX 1080 Ti (GP102) bring-up over TinyGPU on a MacBook Air M1
-Rewritten 2026-11-08, end of session 5.  This file replaces the old session-3
-handoff entirely (its ACR sections are long since resolved; nothing here is
-stale-by-supersession).
+Rewritten 2026-11-12, end of session 10.  This file replaces the session-5
+handoff entirely: the rung-4 FECS blocker it was built around has been closed
+for five sessions, and rungs 1-5 have all landed since.  Nothing here is
+stale-by-supersession — the session-5 file is kept only as history.
 
 Read first, in this order (do not re-derive any of it):
-  ~/egpu-pascal/HANDOFF-SESSION5.md   current rung-4 state, the blocker, corrections
-  ~/egpu-pascal/MMU-AND-ACR.md        the evidence trail: traces, disassembly, negatives
-  ~/egpu-pascal/PLAN.md               the 8-phase plan; Phase 6 now targets MAX
-  ~/egpu-pascal/FINDINGS.md           session 1/2/3 history (older, still valid)
-Then the code: pascal/fifo.py, grchan.py, grctx.py, gr.py, mmu.py, card.py.
+  docs/handoffs/HANDOFF-SESSION9.md  previous session: the async launch ring,
+                                     both runtimes working, the patch-0004 blocker
+  maxpatch/README.md                 what the local MAX patch set is, per version
+  RESULTS.md                         the measured evidence trail, rung by rung
+  PLAN.md                            the 8-phase plan; Phase 6 targets MAX
+Then the code, in this order: pascal/shimd.py + pascal/nvpascal.py (the GPU side
+of the stack), shim/ (the libcuda/NVML replacement), localgpu/local_gpu.py (the
+one-command bring-up + serve), localgpu/bench_chat.py (the multi-turn benchmark),
+maxpatch/ (the MAX patches + installer).
 
 GOAL (user's, standing): run LLM inference on this 1080 Ti over the Thunderbolt /
-USB4 enclosure from this Mac.  llama.cpp is NO LONGER required: Phase 6 was
-decided (2026-11-08) to build a backend for Modular's MAX (Qualcomm), whose
-graph compiler, runtime and hardware backends are public under the MAX License
-and whose device-driver connector is designed to take a new accelerator.
-The user wants persistence and "know exactly where we stopped" over optimism.
+USB4 enclosure from this Mac.  Phase 6 was originally decided as "MAX instead of
+llama.cpp"; in practice BOTH runtimes work and the user drives whichever fits.
+The user wants persistence and "know exactly where we stopped" over optimism:
+every claim in this file is measured on this card, not inferred.
 
 =====================================================================
 1. ENVIRONMENT AND HOW TO RUN ANYTHING
 =====================================================================
-Host: MacBook Air M1, macOS 26.6.2.  Enclosure: Razer Core X V2 (Intel bridge) on
-a TB3/USB4 port; link trains PCIe Gen3 x4.  Card: GTX 1080 Ti, GP102 10de:1b06.
-Transport: tinygrad's TinyGPU DriverKit dext (installed, enabled) + its server
-socket /tmp/tinygpu.sock.  python = ~/.venvs/tinygpu/bin/python (3.12.13).
+Host: MacBook Air M1, macOS 26.6.2.  Enclosure: Razer Core X V2 on a TB3/USB4
+port, PCIe Gen3 x4.  Card: GTX 1080 Ti, GP102, 10de:1b06, 28 SMs, CC 6.1.
+Transport: tinygrad's TinyGPU DriverKit dext + its socket /tmp/tinygpu.sock.
+python = ~/.venvs/tinygpu/bin/python (3.12), APL_REMOTE_SOCK defaulted in
+pascal/card.py.
 
-  ~/.venvs/tinygpu/bin/python pascal/mmu.py --selftest   # page-table encodings, no GPU
-  ~/.venvs/tinygpu/bin/python pascal/mmu_test.py         # MMU on-card selftest (expect 18/18)
-  ~/.venvs/tinygpu/bin/python pascal/gr.py               # ACR + SEC2 RTOS + GR bring-up (expect PASS)
-  ~/.venvs/tinygpu/bin/python pascal/fifo.py             # RT-3: CE channel + semaphores (expect PASS)
-  ~/.venvs/tinygpu/bin/python pascal/grctx.py            # golden context generation (expect PASS)
-  ~/.venvs/tinygpu/bin/python pascal/grchan.py [--gen]   # RT-4: GR compute channel (FAILS at rung 4)
+One command drives the whole stack (card, driver server, container, model,
+proxy, chat):
 
-  PASCAL_TRACE=1 adds per-step PBDMA/PFIFO snapshots inside fifo.Channel.setup().
+  bin/local-gpu status                 card, containers, servers, endpoint
+  bin/local-gpu serve -m <model>       bring it up (also the default command)
+  bin/local-gpu chat                   serve + terminal chat
+  bin/local-gpu pull <model> | models | bench <model> | logs [server|shimd|proxy]
+  bin/local-gpu stop [--all]           stop servers; --all also releases the card
 
-Recovery (copied out of the 24h-pruned scratch dir in session 5 — keep them):
-  pascal/reset_engines.py    PMC_ENABLE bits 8 (PFIFO) + 12 (GR) reset
-  pascal/recover_fifo.py     PFIFO reset + Fifo.init(), clears a wedged scheduler
+  NOTE: -m/--model goes AFTER the subcommand.  `bin/local-gpu -m X serve` does
+  not parse (argparse puts --model on the subparser).  Handoff-session-9 had
+  this wrong; it is fixed there as of session 10.
 
-After any enclosure power cycle the card is cold:
-  pascal/devinit.py firmware/gp102_vbios.rom   then   pascal/fb.py
-before anything else (fb.py also runs the signed nvdec/scrubber.bin once per
-power cycle to unlock the VPR).
+Card cold path (after any enclosure power cycle, sleep, or reboot), in order:
 
-Reference material already local (no network needed): tools/nvkm/ (nouveau, flat
-names), tools/envytools/ with tools/envytools/build/envydis/envydis, firmware/
-gp102/{acr,gr,sec2,nvdec}, firmware/gp102_vbios.rom.
+  ~/.venvs/tinygpu/bin/python pascal/devinit.py firmware/gp102_vbios.rom
+  ~/.venvs/tinygpu/bin/python pascal/fb.py
+  ~/.venvs/tinygpu/bin/python pascal/reset_engines.py
+  ~/.venvs/tinygpu/bin/python pascal/gr.py          # expect: GR BRING-UP RESULT: PASS
+
+`local-gpu serve` does that check itself; `local-gpu stop --all` is the way to
+hand the card back (shimd holds the TinyGPU device lock exclusively — see 5).
+
+Containers (all reachable with `docker exec`):
+  llamacpp    llama.cpp built for sm_61 at /opt/llama-build + shim/build-cuda12
+              (/models holds the GGUF files; port 8080 -> 127.0.0.1:8080)
+  maxnightly  modular 26.8.0.dev2026110805, maxpatch set 0001-0004 installed,
+              HF cache holds gemma-4-E2B-it bf16; `max serve` on container :8000
+  maxlab      modular 26.6.0, patch set 26.6 (the older, still-working MAX path)
+
+Ports on the Mac: 11434 = the Ollama+OpenAI proxy (what clients use), 7461 =
+shimd.  llama-server (8080) and max serve (8000) live inside the containers.
+
+Shim libraries differ per runtime and MUST NOT be mixed:
+  shim/build         libcuda.so.1 + libnvidia-ml.so.1              <- MAX path
+  shim/build-cuda12  those + libcudart/libcublas/libcublasLt .so.12 <- llama.cpp
+MAX is always served with LD_LIBRARY_PATH=/repo/shim/build; llama.cpp with
+shim/build-cuda12 (localgpu/local_gpu.py).  Both dirs are git-ignored build
+outputs; rebuild with shim/build.sh and shim/build-cuda12.sh.
+
+Server command lines actually used (from local_gpu.py, quoted because the flags
+are load-bearing):
+  llama-server -m /models/<file> --alias <name> -ngl 99 -fa on -c <ctx> -np 1
+               -cram 2048 --jinja --host 0.0.0.0 --port 8080
+  max serve --model <hf-id> --served-model-name <alias> --quantization-encoding
+            <enc> --devices gpu --no-device-graph-capture --max-length <ctx>
+            --max-batch-size 1 --host 0.0.0.0 --port 8000 [--no-prefer-module-v3]
+  (MAX env for E-series: MAX_GEMMA4_ACTIVATION_MIB=1024, extra --no-prefer-module-v3)
 
 =====================================================================
 2. WHERE THE WORK STANDS
@@ -53,136 +85,228 @@ gp102/{acr,gr,sec2,nvdec}, firmware/gp102_vbios.rom.
 Rung ladder (PLAN.md section 0): 0 transport+ID, 1 falcon runs our code,
 2 ACR secure boot, 3 MMU + FIFO channel, 4 compute dispatch, 5 inference.
 
-  Rung 0  DONE.  Transport, enumeration, BAR0/BAR1/PRAMIN, VBIOS POST from macOS
-          (devinit.py), all 11 GB VRAM (the VPR hole fixed by fb.py).
-  Rung 1  DONE.  Our own unsigned microcode runs on the falcon(s); DMEM PIO RT.
-  Rung 2  DONE.  ACR secure boot: WPR2 established, NVIDIA signed blobs run,
-          FECS and GPCCS bootstrapped.  (PLAN called this a coin flip.)
-  Rung 3  DONE AND EXCEEDED.  MMU v2 + instance blocks (18/18); PFIFO/PBDMA
-          channels; RAMFC/RAMUSERD; GPFIFO fetch/retire; semaphores; CE copies
-          VRAM <-> sysmem both directions with negative controls (RT-3 + RT-3
-          SYSMEM PASS, reproduced many times).
-  Rung 4  IN PROGRESS — see section 3.  No PGRAPH class method has executed yet.
-  Rung 5  NOT STARTED.  Phase 6 target decided: a MAX backend (PLAN.md).
+  Rung 0-4  DONE (transport, VBIOS POST, ACR secure boot, MMU v2, PFIFO/PBDMA
+            channels, copy engine, GR compute dispatch of ptxas sm_61 cubins).
+  Rung 5    DONE, TWO RUNTIMES.  Modular MAX (via a libcuda+NVML shim) and
+            llama.cpp (via that shim plus cudart/cuBLAS shims) both generate
+            correct tokens on the card over TinyGPU.
+
+  Boot clocks only: 607 MHz SM, 405 MHz memory, ~30 GB/s measured.  That single
+  fact caps every number below — no PMU reclocking has been attempted (writes to
+  the card's clocks need the user's explicit consent; see 4.2).
+
+What runs, and how fast (session-9 numbers, all greedy, batch 1):
+  Gemma 4 E2B bf16 on MAX       ~200 ms/token (5 tok/s), 9.6 GB checkpoint
+  SmolLM2-135M fp32 on MAX      22.7 tok/s, text identical to MAX-CPU
+  SmolLM2-135M Q4_0 on llama.cpp 61 tok/s generation, 447 tok/s prompt
+  Gemma 4 E4B QAT Q4_0 on llama.cpp  6.8-6.9 tok/s decode (session 10)
+
+Models configured in localgpu/local_gpu.py MODELS: gemma4-e4b (DEFAULT, llama,
+QAT Q4_0 5.15 GB, desc "fast, tools"), gemma4-12b (llama, 6.98 GB), llama3.1-8b,
+qwen3-8b (marker thinking=True), smollm2 (llama, "tiny, for testing"),
+gemma4-e2b-max (MAX, bf16 9.6 GB), smollm2-max (MAX, fp32).
+Only e4b, smollm2 and e2b have ever been served; 12b / llama3.1-8b / qwen3-8b
+have no weights on disk yet.
 
 =====================================================================
-3. THE CURRENT BLOCKER (rung 4), EXACTLY
+3. WHAT SESSION 10 DID (2026-11-12, evening)
 =====================================================================
-Everything below is measured on this card, not inferred.
+The multi-turn benchmark existed since session 9 (commit 56cdb71) and had NEVER
+been run — logs/bench/ did not exist.  Session 10 ran it on three models, which
+is where the numbers in section 3.1 come from, and fixed two bugs found doing it.
 
-Symptom.  A PASCAL_COMPUTE_B (0xc1c0) channel binds on runlist 0, but as soon as
-the runlist commit is processed the PBDMA raises event 24 (`0x40108` bit 24 =
-0x01000000), FIFO_INTR (0x2100) latches 0x20000000, `0x800004` = 0x15000003
-(ENABLED + ACTIVE + bits 24/26/28), ib_get/pb_pos stay 0 and a later kick is
-ignored.  No HCE code (intr1 = 0), no PGRAPH exception, no MMU fault.
+3.1 The bench, three models, same 12-turn script (logs/bench/, do not re-run —
+    each run costs 40 s / 5 min / 17 min of card time)
 
-It is engine-0-specific.  The identical traced Channel.setup() on the copy engine
-(chid 2, runlist 5) lands `0x800004 = 0x00000003` with no event at all, on a
-freshly reset FIFO; every step before the commit is byte-identical between the
-two (PASCAL_TRACE=1).  SUBFIFO_ENG_MASK (0x2390 series) ties engine 0 to PBDMA0/1
-only, so there is no alternate PBDMA.
+  model        runtime   wall    decode     prefill / cache      TTFT med/max  tool
+  SmolLM2-135M llama.cpp 39.5 s  47.1 t/s   1623 t/s, 31k cached  0.05/0.9 s    NOT made
+  E4B QAT Q4_0 llama.cpp 302 s   6.88 t/s   270 t/s, 21.5k cached  1.15/6.95 s   ok
+  E2B bf16     MAX       1025 s  4.12 t/s   49 t/s, 0 cached(art)  11.0/390 s    ok
+  (E4B was run twice, 301.7 s / 6.88 and 304.3 s / 6.83 t/s — repeatable.)
 
-Necessary precondition, proven.  ENG_FAULT (`0x00262c`, write-1-to-clear, bit N =
-engine N) must be clear.  With PGRAPH latched (bit 0 set) the channel binds as
-`0x800004 = 0x11000001` and the PBDMA never loads it.  grchan.py clears it
-automatically before binding; always read this register before blaming a channel.
+  * Tool calling works end to end on a model that can do it: E4B and E2B both
+    emitted get_weather{"city":"Tokyo"} + {"city":"Paris"} and then used the
+    tool results verbatim (14 C light rain / 9 C overcast; the harness's fake
+    weather).  SmolLM2-135M cannot: it hallucinated an answer by recycling the
+    RESULTS.md document it had been fed earlier in the conversation, and turn 7
+    was skipped because no tool call was pending.  tool_call_ok is a property of
+    the model, not of the stack.
+  * MAX returns no llama.cpp `timings` block, so its `cached` is always 0 and its
+    "prefill" is prompt/ttft — a derived figure, not a measurement.  Do not
+    compare those two columns across runtimes.  Its two TTFT spikes (216 s on
+    long-doc, 390 s on the first tool-call request) are graph compiles at new
+    input shapes, not prompt processing: that turn generated 29 tokens after a
+    390 s first token, where llama.cpp did the same request in 7 s.
+  * E4B has a thinking channel and it eats the budget: with --max-tokens 200,
+    6 of 12 turns produced NO visible answer — the model planned in the
+    reasoning channel and was cut off before answering (finish=length).  Turn 1's
+    reasoning opens "Here's a plan to answer the request: 1. Analyze the
+    request... 2. Constraint Checklist: Three short paragraphs... Under 200
+    words."  The 5 turns that did answer (code, tool result, translate, haiku,
+    JSON) were competent.  Two knobs before any "E4B quality" claim: raise
+    --max-tokens, or disable the thought channel with
+    chat_template_kwargs {"enable_thinking": false} in the /v1 body.
 
-Where the request dies.  FECS's switch handler (fecs_inst.bin, entry at imem
-0x10e9) writes breadcrumbs to host registers:
-    entry:  0x4098cc = 0x200, then an ack code 0x8000000N -> 0x409a20
-    (then it pumps the context through the falcon's XD DMA — xdld/xdst with
-     $xdbase — spinning on XFER_STATUS pending counts at imem 0x11b4-0x11d9)
-    exit:   0x409a20 = 0, 0x200 -> 0x40984c
-At our stall ALL THREE read 0: the handler is never entered.  Meanwhile
-`0x409b04` bit 31 (request valid) is set while `0x409b00` bit 31 (switch in
-progress) is clear — a request is queued that FECS never picks up.
+3.2 Fixes made in session 10 (see the uncommitted list at the end)
 
-Every host-writable lever has been tried and excluded (each followed by a kick,
-watching 0x40108 / 0x40100 / ib_get / gp_get):
-  - 13 candidate acks: ENG_FREEZE, ENG_FAULT W1C, 0x400500 |= 0x10000,
-    0x409808 |= bit19, 0x409800 = 0/1, TSG preempt, runlist recommit, 0x800004
-    trigger, 0x002300 = 0, 0x002628 |= 1, 0x400704 clear, 0x409c20 = 1.
-  - FECS control method 0x39 ("start/resume context switching") fired at the live
-    ACTIVE channel — accepted, handler still not entered.
-  - irqmsk (0x409014) is not host-writable in this mode: 0xffffffff reads back 0
-    (0x40901c does accept 0x40).  An ACR/LS-mode falcon owns its own delivery.
-  - Host -> PGRAPH method injection (0x404488/0x40448c, class in the ctrl word)
-    binds the class (`0x404204 = 0xc1c0`) but will not execute a stateful method
-    (report semaphore), either after setup() or inside generation (--gen-inject):
-    without the switch there is no current context to apply methods to.
+  * localgpu/local_gpu.py — the MAX alias bug.  The proxy rewrites every
+    request's "model" to the LOCAL alias, but `max serve` only accepts the HF
+    repo id, so every MAX request through the proxy died with
+    `400 Unknown model 'gemma4-e2b-max', currently serving ['google/gemma-4-E2B-it']`.
+    Fixed by passing `--served-model-name <alias>`; verified HTTP 200 through
+    127.0.0.1:11434 before re-running.  This is why the default MAX path had
+    never been exercised end to end — its first real request failed.
+  * localgpu/bench_chat.py — recorded only `content`, so a thinking-channel
+    model looked like it produced nothing.  Now stores `reasoning` per turn,
+    prints `[think: N chars, no content]` instead of a blank line, counts
+    `thinking_turns` (tool-call turns excluded), and warns in the report when the
+    backend supplied no timings block.
+  * docs/handoffs/HANDOFF-SESSION9.md — the -m argument-order typo in its resume
+    block.
+
+3.3 Proof that the tokens are computed on the CARD (the user asked, twice)
+
+  Four independent checks, all reproduced in session 10:
+  1. The server's own flags: llama-server runs `-ngl 99` — all layers on the
+     GPU device, which is our shim reporting the 1080 Ti (CC 6.1, 28 SMs, 10 GiB).
+  2. What the shim pushed: the container's SHIM_LOG shows ggml's real Q4_0
+     kernels arriving as `cuModuleLoadDataEx(cubin, N bytes) -> status 0` and
+     buffers as `cuMemAlloc(n) -> 0x119...` (device VAs from our own MMU).
+  3. A live libcudart/cuBLAS conformance test through the RUNNING shimd:
+     shim/cudart/test_runtime.cu built with nvcc and run with
+     LD_LIBRARY_PATH=/repo/shim/build-cuda12 SHIM_MODE=remote -> kernels with
+     dynamic shared memory + __syncthreads, cudaMemcpy2D, memset, and four
+     cuBLAS GEMMs against host references, all "ok", RESULT: PASS.
+  4. The decisive one (probes/freeze_card_test.py): SIGSTOP the driver server
+     (`~/.local/state/local-gpu/shimd.pid`) mid-generation.  The token stream
+     stopped dead at that instant — 29 tokens before the freeze, ZERO for the
+     next three minutes — and SIGCONT brought the server straight back (fresh
+     request: 54 tok/s, healthy).  A CPU-side token would not have noticed.
+     The shim has no socket timeouts (checked), so the freeze is safe; the
+     in-flight client's stream does not resume, but the server is unharmed.
+
+  Why the fan cannot be heard (do not chase this): the stack runs the card's own
+  PMU — pascal/devinit.py ports nouveau's gm200_devinit_post — so the card's
+  onboard thermal/fan policy is in charge, and we never program a fan curve.
+  Nothing in this tree reads temperature or RPM (pascal/dma_probe2.py only
+  touches the THERM interrupt bit), and at 607/405 MHz boot clocks with a small
+  model in sub-second bursts the board is drawing a few tens of watts, below
+  where any 1080 Ti ramps its fan.  Silence proves nothing either way.
 
 =====================================================================
-4. NEXT STEPS, RANKED
+4. OPEN TASKS, RANKED
 =====================================================================
-1. Find who is supposed to DELIVER the switch request to FECS.  Candidates: the
-   PFIFO engine/preempt path (does runlist 0 need the TSG entry flagged, or the
-   channel inserted so the scheduler requests a switch rather than the request
-   appearing only at bind?), or a PBDMA write into a FECS mailbox that our
-   hand-built bind sequence never issues.  Read nvkm's engine/fifo/*.c around
-   gk104_runl_commit and the engn paths with exactly this question in mind — the
-   bind itself is now known-good.
-2. Reproduce the one clean GR load (chan = 0x00000003 with subchannel-0 host
-   methods actually executing).  It happened once; the difference is still
-   unknown and is the strongest evidence rung 4 is reachable.
-3. Only after 1–2: QMD v02_01 + compute setup (Mesa tools/mesa/nve4_compute.c) +
-   a `ptxas sm_61` kernel (CUDA 12.x — CUDA 13 dropped Pascal) writing a
-   vector-add result to sysmem.  That is the rung-4 gate.
-4. Phase 6, MAX: start from the device-driver connector seam; Mojo kernels must
-   lower to PTX assembled with ptxas sm_61.  Ceiling stays boot clocks (no PMU
-   firmware -> no reclocking on any open path).
+1. **Finish MAX patch 0004 (int8 W8A16 weights).**  The `w8_linear` custom op
+   (maxpatch/kernels/w8) is written and benchmarked standalone
+   (kernels/w8_check.py: 1.2-2.8x decode, 5.5-11x prefill over MAX's bf16
+   ops.matmul), and MAX_GEMMA4_INT8=1 makes the gemma4 config declare INT8_W8A8
+   with load-time RTN quantization — but a full model compile still fails with
+   `error: 'mo.custom' op MOToMAP: no kernel registered for 'w8_linear'`.  Two
+   registration paths were tried; the trace was at pipelines/lib/graph_specs.py
+   (GraphSpec.custom_extensions) when session 9 ended.  Read how the GraphSpec
+   built in architectures/gemma4/model.py is compiled and where that field is
+   consumed.  Session 10 saw MAX's shim log load `mogg_foreach_r1_w8_b256_*`
+   modules during an E2B bring-up, so the package does reach some compile path —
+   worth comparing against what the failing pipeline compile does.
+   This is what would let Gemma 4 E4B (9.4 GB of device weights, over the card's
+   ~8.8 GiB pool) run on MAX at all.
+2. **Memory clock** — the single biggest performance lever.  Still boot clocks
+   (405 MHz memory / ~30 GB/s); every decode number in this file is capped by it
+   (E4B at 5.15 GB/token cannot exceed ~6 tok/s).  The VBIOS BIT 'P' performance
+   table is parsed by pascal/vbios_perf.py (per-domain entries, memory = domain
+   2, RAMMAP bands); the open question is the pointer arithmetic for the
+   per-strap subentries.  **Register writes to the card's clocks require the
+   user's explicit consent — ask first.**
+3. **Re-run the llama.cpp op suite** after commit c4f50f5 (which added
+   cublasStrsmBatched for ggml's SOLVE_TRI).  Session 9's run passed 13,380 cases
+   then aborted with exit 134 (the shim's generated stubs log and abort on an
+   unimplemented entry point); the rebuild is verified, the re-run is not.
+   `test-backend-ops -o MUL_MAT` is the quick pass; a failure names the missing
+   entry point.
+4. **Bench knobs before judging model quality** (see 3.1): raise --max-tokens and
+   / or disable the thought channel, so a thinking model's plan and its answer
+   both fit.  Optionally add the same switch to bench_chat.py's body.
+5. **Die temperature.**  pascal/therm.py reads BAR0 0x020460 per
+   nouveau's gp100_temp_get (valid bit 0x20000000, (reg & 0x1fff8) >> 8).  It
+   cannot run while shimd owns the card: the TinyGPU transport takes an exclusive
+   lock (nv_usb4.lock) and a second opener dies with "Failed to acquire lock
+   file".  Either `local-gpu stop --all` for the ~5 s the read takes, or add an
+   op 11 TEMP to shimd's protocol (its docstring documents ops 1-10; the handler
+   is three lines and it already owns a Card handle) so it is readable any time.
+6. Reference numbers to beat: E4B 6.8-6.9 tok/s and SmolLM2 61 tok/s on
+   llama.cpp; E2B 200 ms/token on MAX (both at boot clocks).
 
 =====================================================================
 5. STANDING CORRECTIONS AND GOTCHAS (do not re-learn these)
 =====================================================================
-* ENG_FAULT (0x262c bit 0) blocks all engine-0 channel loads — clear it first.
-* Generate the golden context AT MOST ONCE per FECS boot.  FECS method 0x10 is an
-  allocation watermark, not a size: 0x146500 fresh, then 0x275600 / 0x433000 /
-  0x95b000 after successive generations.  Pass an explicit size to
-  grctx.generate(size=...); the real image length is header word 1 (0xa5e00).
-* An instance is not an address space until its PD is joined into the instance
-  block (vmm.join(inst)) — grctx.generate does this before bind_pointer.
-* FECS's MMU binding is per-instance and only bind_pointer (FECS method 3) moves
-  it; ctx_chan (method 1) times out on GP102 and rebinds nothing.  A PDE fault
-  raised while FECS works names the instance whose page directory it used.
-* Host->PGRAPH method encoding is `ctrl | (addr << 14)` with the FULL 16-bit
-  method address (field is bits 14..29).  It was wrong until session 5; fixed in
-  gr.py:methods() and grctx.mthd().
-* 0x404200+subc*4 class registers are set by golden generation (sw_method_init):
-  sc1 = c1c0 there is NOT proof that your own SET_OBJECT landed.
-* Compute class subchannel is 1 (SUBC_NVC1C0); 4 is the copy engine (NVC1B5).
-* A failed GR run wedges the scheduler FIFO-wide: a following CE run fails too.
-  Always reset PFIFO (pascal/reset_engines.py, pascal/recover_fifo.py) between
-  engines.
-* Do not re-add a commit retry loop: re-clearing event 24 and re-committing
-  re-raises it deterministically and wedges the runlist counter (0x2284 bit 20).
-* This tree is NOT a git repository.  Consider committing pascal/ + docs (tools/
-  ignored or submoduled) before large edits.
-* Ground rule from earlier sessions, still binding: every claim is a round trip
-  with a negative control, and print the raw register value the judgement was
-  made from.  Never trust a "poison vs decoded" read without a control register.
+* `bin/local-gpu -m X serve` does not parse — `bin/local-gpu serve -m X`.
+* MAX needs `--served-model-name <local alias>` or every proxied request 400s
+  (fixed in local_gpu.py in session 10; do not remove it).
+* Never put shim/build-cuda12 on MAX's LD_LIBRARY_PATH: MAX ships its own cuBLAS
+  bindings (_cublas.mojoc) and a vendor-BLAS fallback in linalg, which MAX's
+  kernel-compile gate (maxpatch 0001) disables for compute < 7.0 anyway. MAX is
+  driven only through libcuda + libnvidia-ml (it dlsyms ~118 cu* + 16 nvml*).
+* MAX TTFT spikes are graph compiles at new input shapes, not prefill. MAX also
+  reports no per-request timings, so cached/prefill columns are derived.
+* E4B (QAT Q4_0) plans in a thinking channel before answering; a 200-token budget
+  is often spent entirely on the plan. Its channel is `reasoning_content`; the
+  GGUF carries the `<|channel>` markers.
+* shimd holds the TinyGPU device exclusively: only one client-side process family
+  at a time, and no second process may open the card while it runs.
+* SHIM_QUIET=1 logs module loads, allocations, stubs and errors — NOT launches.
+  Per-kernel GPU time is `NVPASCAL_PROF=1` on the *server* (printed on client
+  disconnect) and `SHIMD_TRACE=1` logs copies and device pointers. Set those on
+  shimd, which `local-gpu` starts for you.
+* Recreating a container does not pick up edits to bind-mounted files; the repo
+  is mounted at /repo in every container, so edits are live, but a *process*
+  started before the edit keeps the old code.
+* tinygrad's own NV runtime must never be pointed at this card (NV=1): it issues
+  a PCIe FLR that Pascal misreads (tinygrad PR #19323 carries the write-up).
+* Sleep takes the Thunderbolt link down and the next MMIO is a kernel panic
+  (`LLC Bus error`). pascal/sleepguard.py holds a caffeinate assertion in every
+  card-holding process and refuses MMIO after a sleep; keep the lid open.
+* Ground rule from all sessions: every claim is a round trip with a negative
+  control, and print the raw value the judgement came from.
 
 =====================================================================
 6. FILE MAP
 =====================================================================
-  pascal/card.py          BAR0/PRAMIN/BAR1 access: rd/wr/vram_read/vram_write
-  pascal/mmu.py           MMU v2: VMM, instance blocks, VramHeap, walker (~470 lines)
-  pascal/mmu_test.py      on-card MMU selftest (18/18)
-  pascal/acr.py           ACR secure boot (WPR2, signed blobs)
-  pascal/gr.py            GR bring-up: FECS/GPCCS, netlists, methods()
-  pascal/gr_ctxctl.py     FECS method plumbing (bind_pointer, wfi_golden_save, ...)
-  pascal/grctx.py         golden context generation: generate(size=, inject=)
-  pascal/fifo.py          Fifo, Channel (setup/teardown/push/kick), PBDMA init,
-                          PASCAL_TRACE per-step trace, ramfc_dump()
-  pascal/grchan.py        GRChannel + probes: --gen --gen-inject --ctx-chan
-                          --ack-search --irq-unmask --ctxsw-start(-after) --runq1
-  pascal/fb.py            VRAM/fb topology, VPR/scrubber unlock
-  pascal/devinit.py       VBIOS POST
-  pascal/faults.py        MMU fault decode/clear
-  pascal/reset_engines.py, pascal/recover_fifo.py    recovery recipes
+  pascal/shimd.py        the macOS-side driver server: the CUDA driver ABI over
+                         nvpascal, TCP protocol ops 1-10 documented in its
+                         docstring; PTX is JIT'd with ptxas -arch=sm_61
+  pascal/nvpascal.py     the runtime: GR channel, QMD/constant-bank upload from
+                         the pushbuffer (the async launch ring, commit 611fe85)
+  pascal/card.py         BAR0/PRAMIN/BAR1 access: rd/wr/vram_read/vram_write
+  pascal/therm.py        die temperature read (0x020460) — needs the card free
+  pascal/devinit.py      VBIOS POST (PMU DEVINIT app), fb.py VRAM/VPR unlock
+  pascal/gr.py, fifo.py, grchan.py, mmu.py, acr.py, grctx.py, faults.py,
+  reset_engines.py, recover_fifo.py, bench.py, test_modules.py, test_async.py
+  shim/                  libcuda.so.1 + libnvidia-ml.so.1 (build/) and the
+                         cudart/cublas layers (build-cuda12/); README lists the
+                         env knobs (SHIM_MODE=remote, SHIM_LOG, SHIM_CAPTURE_DIR)
+  shim/tests/            vadd.mojo, shfl.mojo, graph_add.py, ops_check.py,
+                         exp_check.py, generate.sh (the MAX/llama end-to-end)
+  shim/cudart/test_runtime.cu  the libcudart+cuBLAS conformance test
+  localgpu/local_gpu.py  card/stack bring-up, model table, serve/chat/status,
+                         the Ollama+OpenAI proxy launcher (ollama_proxy.py)
+  localgpu/bench_chat.py the 12-turn multi-turn benchmark (TTFT, prefill/decode,
+                         prompt-cache reuse, tool call, thinking channel)
+  maxpatch/              patches/<modular-version>/ + install.sh (+ --revert),
+                         kernels/w8 (the int8 custom op), patch_target.py
+  kernels/               PTX sources + sm_61 cubins + the ptxas Docker build
+  probes/freeze_card_test.py   proves the token stream is gated by the driver
+                         server (SIGSTOP the server, watch the stream stop)
+  logs/bench/            the four session-10 benchmark reports (.json + .md)
+  docs/                  evidence trail, per-session handoffs, docs/upstream/
+                         (the three draft Modular PRs + what stays local)
 
-Evidence/notes: HANDOFF-SESSION5.md, MMU-AND-ACR.md (long evidence trail),
-PLAN.md (phases; Phase 6 = MAX), FINDINGS.md, ROUNDTRIP-PLAN.md.
+Card state as handed over: warm and serving gemma4-e4b on llama.cpp (context
+16384, all layers on the card, 6.8 GiB of 10.0 GiB free).  shimd is up
+(--vram-limit-gib 10).  SM 607 MHz, memory 405 MHz.  `bin/local-gpu stop --all`
+hands the card back and clears the lock that pascal/therm.py needs.
 
-Card state as handed over: warm and idle — reset_engines + gr.py (GR BRING-UP
-PASS) + fifo.py (RT-3 + RT-3 SYSMEM PASS) were the last operations; FIFO_INTR 0,
-no MMU faults, ENG_FAULT clear, runlist idle.  Nothing running in the background.
+Git state as handed over: HEAD 1f94923 ("Modular patches are open as draft PRs"),
+17 commits.  Uncommitted when this file was written: localgpu/local_gpu.py and
+localgpu/bench_chat.py (the two session-10 fixes), docs/handoffs/
+HANDOFF-SESSION9.md (the -m typo), new pascal/therm.py and
+probes/freeze_card_test.py, and logs/bench/ (the reports, untracked).
