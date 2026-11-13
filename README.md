@@ -47,8 +47,12 @@ rung 5  model inference: llama.cpp (QAT 4-bit, tool calling), MAX (SmolLM2, Gemm
 
 **llama.cpp is the serving path**, on quantized weights; MAX stays for what only it can do (bf16
 checkpoints) and as the thing that exercised the libcuda shim hardest — it has no int4 path for
-Pascal (GP102 has no tensor cores), so it pays roughly twice the weight bytes: Gemma 4 E2B is
-9.8 tok/s in bf16 and 13.4 tok/s with int8 weights (patch 0004).
+Pascal (GP102 has no tensor cores), so it pays more weight bytes per token. On the one model both
+runtimes serve (Gemma 4 E2B, section 18) that is worth **1.38x on decode and 5x on prefill**
+against MAX's int8 weights, and 1.87x / 90x against bf16 — but the reason is the quantization, not
+the engine: llama.cpp's QAT GGUF reads ~40% fewer bytes, while MAX actually sustains *more*
+bandwidth per second (63 GB/s int8, 92 GB/s bf16, against llama.cpp's ~50). MAX's own numbers, for
+the record: Gemma 4 E2B 9.8 tok/s bf16, 13.4 tok/s int8 (section 16).
 
 ## Requirements
 

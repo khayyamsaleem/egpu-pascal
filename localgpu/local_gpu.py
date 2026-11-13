@@ -67,10 +67,21 @@ MODELS = {
                      desc="Qwen3 8B, Q4_K_M: reasoning (thinking) model, good tool use"),
     "smollm2": dict(repo="bartowski/SmolLM2-135M-Instruct-GGUF", file="SmolLM2-135M-Instruct-Q4_0.gguf", size=0.09,
                     family="llama", params="135M", quant="Q4_0", ctx=8192, desc="SmolLM2 135M: tiny, for testing"),
+    # The same-model cross-runtime pair (RESULTS.md section 18): E2B exists both as a QAT Q4_0 GGUF and as
+    # the HF checkpoint MAX loads, so this is the only model where the runtime can be held fixed while the
+    # quantization changes.  ctx 8192 matches the MAX entry so the two differ in runtime, not in cache size.
+    "gemma4-e2b": dict(repo="google/gemma-4-E2B-it-qat-q4_0-gguf", file="gemma-4-E2B_q4_0-it.gguf", size=3.35,
+                       family="gemma4", params="5B (E2B)", quant="Q4_0", ctx=8192,
+                       desc="Google Gemma 4 E2B, QAT 4-bit: the llama.cpp half of the E2B/MAX comparison",
+                       mmproj="gemma-4-E2B-it-mmproj.gguf", mmproj_size=0.99),
     # MAX (Modular) runtime: Hugging Face checkpoints, bf16/fp32 only (see maxpatch/README.md)
     "gemma4-e2b-max": dict(runtime="max", hf="google/gemma-4-E2B-it", encoding="bfloat16", size=9.6, family="gemma4",
                            params="5B (E2B)", quant="BF16", ctx=8192, extra="--no-prefer-module-v3",
                            env="MAX_GEMMA4_ACTIVATION_MIB=1024", desc="Gemma 4 E2B on Modular MAX (nightly), bf16"),
+    "gemma4-e2b-max-int8": dict(runtime="max", hf="google/gemma-4-E2B-it", encoding="bfloat16", size=9.6, family="gemma4",
+                                params="5B (E2B)", quant="INT8 (W8A16)", ctx=8192, extra="--no-prefer-module-v3",
+                                env="MAX_GEMMA4_INT8=1 MAX_GEMMA4_ACTIVATION_MIB=1024",
+                                desc="Gemma 4 E2B on MAX, int8 weights (patch 0004): 8 bits where the QAT GGUF reads 4.5"),
     "smollm2-max": dict(runtime="max", hf="HuggingFaceTB/SmolLM2-135M-Instruct", encoding="float32", size=0.5,
                         family="llama", params="135M", quant="F32", ctx=8192, desc="SmolLM2 135M on Modular MAX, fp32"),
 }

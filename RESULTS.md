@@ -936,3 +936,58 @@ three per session.
 `bin/hermes-local` rather than bare `hermes chat -m local` -- it is the same thing with half the
 prompt -- and prefer an interactive session over `-q` when the work needs `execute_code` or
 `python3 -c`.
+
+---
+
+## 18. The same model on both runtimes: llama.cpp vs MAX on Gemma 4 E2B (session 17, 2026-11-13)
+
+Every earlier cross-runtime comparison changed the model as well as the runtime, so the runtime was
+never isolated. Gemma 4 E2B exists in both worlds -- Google ships a QAT Q4_0 GGUF
+(`google/gemma-4-E2B-it-qat-q4_0-gguf`, 3.35 GB) and MAX loads the HF checkpoint
+(`google/gemma-4-E2B-it`, bf16) -- so it is the one model where the quantization changes while the
+model is held fixed. New model-table entries: `gemma4-e2b` (llama), `gemma4-e2b-max-int8`, and the
+pre-existing `gemma4-e2b-max`.
+
+Protocol: one client (curl through the Ollama/OpenAI proxy on 127.0.0.1:11434, so nothing in the
+test knows which backend is up), one body -- a single user turn, temperature 0, max_tokens 96,
+streamed -- two runs per backend. Prefill is the same shape with a 629-token prompt and 8 output
+tokens. Every backend produced **exactly 96 tokens**, so the token budget is held fixed as well.
+llama.cpp ran with `LOCAL_GPU_PLAIN=1` (no n-gram speculation) because MAX has no equivalent.
+Decode is 96 / (wall - time-to-first-token), client-side, because MAX reports no per-request
+timings; llama.cpp's own reported decode agrees to within 2% (17.98 vs 17.6 client-side).
+
+| Gemma 4 E2B, greedy, same prompt | decode tok/s | prefill tok/s | TTFT (31-token prompt) |
+|---|---|---|---|
+| llama.cpp, QAT Q4_0 (~2.8 GB/token) | **17.98** | **1156** | 0.03 s |
+| MAX, int8 W8A16 (patch 0004, ~4.8 GB/token) | 13.0 / 13.2 | 231 | 0.37 s |
+| MAX, bf16 (~9.6 GB/token) | 9.6 / 9.6 | 12.9 | 2.0 s |
+
+What it settles:
+
+* **llama.cpp wins on the same model, but by less than the byte count predicts.** 17.98 against
+  13.1 tok/s is 1.38x, where 4.5 bits against 8 bits predicted about 1.8x. Against MAX bf16 it is
+  1.87x. So the earlier "~1.8x expected" was the right direction and the wrong size.
+* **MAX is not the slower engine per byte -- it moves MORE of them.** At these rates llama.cpp
+  shifts ~50 GB/s of weights, MAX int8 ~63 GB/s and MAX bf16 ~92 GB/s, i.e. MAX bf16 decode sits
+  exactly on this card's measured ceiling (~92 GB/s, section 13), int8 leaves headroom, and
+  llama.cpp's 50 GB/s says its E2B decode is launch-bound rather than bandwidth-bound. llama.cpp
+  wins because the QAT GGUF reads ~40% fewer bytes per token, not because the runtime is better at
+  this card. That is the honest correction to "llama.cpp always beats MAX": it wins on every
+  configuration measured, for a quantization reason.
+* **Prefill is where the gap is real**: 5x against MAX int8, 90x against MAX bf16. The int8 patch
+  buys 18x on MAX's own prefill (12.9 -> 231 tok/s) and 1.36x on decode (9.6 -> 13.1), which is the
+  strongest argument on record for keeping patch 0004.
+* Text is **not** byte-identical across runtimes: llama.cpp answers in prose, MAX in markdown with
+  a heading (`## How a Hash Table Handles Collisions`). Each runtime renders its own chat template,
+  which is a confound on both speed and text -- within MAX, int8 and bf16 openings are identical,
+  as section 16 found.
+
+**Still not measured:** E4B on MAX (the 14.9 GiB download), and llama.cpp at the *same* 8 bits as
+MAX int8 (a Q8_0 GGUF) -- that is the pair that would separate runtime from quantization
+completely. On the evidence above the defensible claim is "llama.cpp is faster in every
+configuration measured, and the reason is the quantization", not "llama.cpp is always faster".
+
+**Hygiene note.** The first request after a change of prompt shape absorbs a KV-cache rebuild that
+is visible only client-side: 18 s and 35 s of TTFT were seen while the server's own `prompt_ms`
+stayed at 272 ms. Warm up once and discard that request, and do not measure while a model download
+is saturating the container.
