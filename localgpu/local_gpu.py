@@ -12,6 +12,7 @@
                                     and asks before each call (/yes turns that off); paths stay inside
                                     --root
   local-gpu run M "prompt"          one-shot answer
+  local-gpu sandbox --build         build the code-sandbox image (the chat's python/shell tools)
   local-gpu status | models | pull M | logs [server|shimd|proxy] | bench [M] | stop [--all]
 
 What `serve` does, skipping whatever is already up:
@@ -475,6 +476,13 @@ def cmd_bench(a):
           % (SHIM_ENV, m["file"]), capture=False)
 
 
+def cmd_sandbox(a):
+    """`local-gpu sandbox [--build|--status|--reset|--shell|--run CODE]`."""
+    sys.path.insert(0, os.path.join(REPO, "localgpu"))
+    import sandbox_exec
+    return sandbox_exec.main(a.what)
+
+
 def cmd_chat(a, prompt=None):
     a.quiet = True
     cur = serve(a)
@@ -484,7 +492,8 @@ def cmd_chat(a, prompt=None):
              tools=getattr(a, "tools", None) is not None, yes=getattr(a, "yes", False),
              root=getattr(a, "root", None) or REPO,
              pin=getattr(a, "tools", None) or "", auto=not getattr(a, "no_auto", False),
-             temp=getattr(a, "temp", None), examples=not getattr(a, "no_examples", False))
+             temp=getattr(a, "temp", None), examples=not getattr(a, "no_examples", False),
+             mounts=chat._load_sandbox().parse_mounts(",".join(getattr(a, "mount", None) or [])))
 
 
 def _harness_args(p):
@@ -500,6 +509,9 @@ def _harness_args(p):
                         "its thinking channel; env LOCAL_GPU_TEMP)")
     p.add_argument("--no-examples", action="store_true",
                    help="do not put the terse-answer few-shot in the prompt prefix")
+    p.add_argument("--mount", action="append", default=None, metavar="HOST[:TAG][:ro|rw]",
+                   help="share a host folder into the code sandbox, read-only by default "
+                        "(repeatable; also LOCAL_GPU_SANDBOX_MOUNTS, or /mount in a session)")
     return p
 
 
@@ -527,6 +539,8 @@ def main():
     p.add_argument("model"); p.add_argument("prompt", nargs="*"); p.add_argument("--system", default=None)
     _harness_args(p)
     sub.add_parser("status"); sub.add_parser("models")
+    p = sub.add_parser("sandbox", help="the code sandbox: --build | --status | --reset | --shell | --run CODE")
+    p.add_argument("what", nargs="*", default=["--status"])
     p = sub.add_parser("pull"); p.add_argument("model")
     p = sub.add_parser("stop"); p.add_argument("--all", action="store_true", help="also stop the driver server")
     p = sub.add_parser("logs"); p.add_argument("which", nargs="?", default="server", choices=["server", "shimd", "proxy"])
@@ -544,7 +558,7 @@ def main():
         cmd_chat(a, prompt=" ".join(a.prompt) or None)
     else:
         {"status": cmd_status, "models": cmd_models, "pull": cmd_pull, "stop": cmd_stop, "logs": cmd_logs,
-         "bench": cmd_bench}[a.cmd](a)
+         "bench": cmd_bench, "sandbox": cmd_sandbox}[a.cmd](a)
 
 
 if __name__ == "__main__":

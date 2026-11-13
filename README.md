@@ -106,7 +106,8 @@ active ones go into a request** -- the default is one tool wide (`use_tools`) an
 | `repo` | `list_files`, `read_file`, `grep_repo`, `git_cmd` (read-only git) | grep / git / diff / file / repo |
 | `market` | `stock_quote` (Nasdaq for US tickers, Yahoo for foreign/index, CoinGecko for crypto), `fx_rate` (ECB) | stock / ticker / trading at / exchange rate |
 | `compute` | `calc` (AST-checked arithmetic, no side effects) | how many / calculate / percent |
-| `edit` | `write_file`, `run_command`, `python` | **never automatically**, and each call asks first |
+| `sandbox` | `python`, `shell` (run in an hvi microVM or a locked-down container) | python / script / pandas / plot / parse / unit test |
+| `edit` | `write_file`, `run_command` (ON THE HOST) | **never automatically**, and each call asks first |
 | `memory` | `remember`, `recall` (notes in `~/.local/state/local-gpu/chat-notes.md`) | remember / recall |
 | `time` | `now` | what time / the date |
 | `demo` | `get_weather` | (offline demo) |
@@ -135,6 +136,33 @@ company name, market cap and 52-week range), Yahoo's keyless chart endpoint for 
 and indices, CoinGecko for crypto pairs.  One measured gotcha worth keeping: Yahoo's edge returns
 **429 to a full browser User-Agent but 200 to a plain `Mozilla/5.0`**, same request -- the finance
 fetches therefore send the short one.
+
+## Running code: the sandbox
+
+The model can write and run code without the question "may I run this?" having to be "only if I read
+it first", because the code never runs on the Mac. Two backends, picked automatically:
+
+* **hvi** (default) — a [microVMM](https://github.com/brig-sh/hvi-vmm) that talks to
+  Hypervisor.framework directly, so every call boots its **own Linux guest with its own kernel**.
+  Measured 0.3–0.7 s per call, boot included.
+* **docker** — `egpu-sandbox:3.12`, no network, read-only rootfs, caps dropped, used when hvi is
+  missing and always for `deps` installs (that step needs egress).
+
+Both see the same `/work` (writable, results come back through it), `/deps` (on `PYTHONPATH`) and a
+read-only `/repo`; neither sees the host home, the docker socket, or a network by default.  Host
+folders are shared only when *you* declare them — `--mount ~/data:/data:ro`, `LOCAL_GPU_SANDBOX_MOUNTS`,
+or `/mount` in a session — and appear at `/mnt/<tag>`; there is deliberately no tool argument for a
+mount, so the model cannot ask for `~/.ssh`.
+
+Dependencies: numpy pandas matplotlib scipy sympy tabulate requests bs4 lxml pyyaml dateutil are
+preinstalled, and `deps=["pkg"]` pip-installs into the shared deps dir, which one install serves to
+both backends.  `bin/local-gpu sandbox --status | --guest | --build | --reset | --shell`; full notes
+in [sandbox/README.md](sandbox/README.md).
+
+Verified on the card: asked to read a host file mounted at `/mnt/data`, the model wrote Python that
+read it inside the guest (0.4 s) and printed its SHA-256 — which matched `shasum -a 256` on the Mac
+exactly.  A read-only mount refuses writes with `Read-only file system`; a read-write mount's file
+appears on the host afterwards.
 
 ## Thinking is the cost, not the answer
 

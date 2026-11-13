@@ -26,8 +26,9 @@ BUNDLES = {
     "web": "search the web and read pages",
     "repo": "files, grep and read-only git in the working root",
     "compute": "arithmetic (no side effects)",
+    "sandbox": "run code in a locked-down container: no network, no host filesystem, capped",
     "market": "stock quotes and exchange rates",
-    "edit": "write files, run shell and Python -- each one asks first, and nothing here auto-loads",
+    "edit": "write files and run commands ON THE HOST -- each asks first, nothing here auto-loads",
     "memory": "notes that outlive /clear",
     "time": "the clock (models hallucinate dates)",
     "demo": "the offline weather tool",
@@ -44,6 +45,8 @@ BUNDLE_KEYWORDS = {
     "compute": ("calculat", "compute", "how many", "average", "percent", "convert",
                 "arithmetic", "sum of"),
     "memory": ("remember", "recall", "note that", "forget"),
+    "sandbox": ("python", "script", "pandas", "numpy", "matplotlib", "plot", "parse", "regex",
+                "sandbox", "unit test", "jupyter", "csv file", "dataframe", "parse this"),
     "market": ("stock", "ticker", "share price", "shares of", "market cap", "trading at",
                "nasdaq", "nyse", "s&p", "exchange rate", "fx rate", "stock price", "quote for"),
     "time": ("what time", "the date", "today's date", "what day", "utc"),
@@ -106,6 +109,7 @@ COMMANDS = {
     "/auto": "toggle loading a bundle just because the wording matches it",
     "/yes": "toggle the write_file/run_command/python confirmation",
     "/temp": "/temp [0..2] -- sampling temperature; lower is shorter thinking (default 0)",
+    "/mount": "/mount <host>[:<tag>][:ro|rw] -- share a host folder into the sandbox (ro default)",
     "/help": "/help [fuzzy] -- this list, ranked by your query",
 }
 ALIASES = {"/quit": "/exit", "/bye": "/exit", "/?": "/help", "/h": "/help", "/cmds": "/help"}
@@ -258,8 +262,18 @@ register("stock_quote", "market",
          {"symbols": S, "detail": {"type": "boolean"}}, ["symbols"])
 register("fx_rate", "market", "Exchange rates (ECB, via frankfurter.dev)",
          {"base": S, "to": S}, [])
-register("python", "edit", "Run a short Python snippet and return its output (asks first)",
-         {"code": S}, ["code"], gated=True)
+# sandbox: code runs in a VM of its own (hvi microVM) or a locked-down container (localgpu/sandbox_exec.py)
+register("python", "sandbox",
+         "Run Python 3.12 in a sandboxed machine of its own (no network, no host filesystem except "
+         "the mounts the user declared, capped memory/CPU) and return its output. /work is yours and "
+         "persists between calls; the repo is read-only at /repo; user-declared host folders appear "
+         "under /mnt/. Preinstalled: numpy pandas matplotlib scipy sympy tabulate requests bs4 lxml "
+         "pyyaml dateutil. For anything else pass deps=[\"pkg\"]: pip installs it into /deps, which "
+         "is on PYTHONPATH and shared by every later call (that step asks first and needs network).",
+         {"code": S, "deps": {"type": "array", "items": S}, "files": {"type": "object"},
+          "timeout": I, "net": {"type": "boolean"}}, ["code"])
+register("shell", "sandbox", "Run a shell command in the same sandboxed machine (sh -c)",
+         {"command": S, "timeout": I, "net": {"type": "boolean"}}, ["command"])
 # memory
 register("remember", "memory", "Append a durable note (survives /clear and later sessions)",
          {"text": S}, ["text"])
@@ -679,6 +693,12 @@ def recall(query="", n=30):
                                   "\n".join(lines[-n:]) or "(none)")
 
 
+def _load_sandbox():
+    """Import the sandbox runner (localgpu/sandbox_exec.py)."""
+    import sandbox_exec
+    return sandbox_exec
+
+
 def call_tool(name, args, ctx):
     """Execute one tool call and return its result as a string (never raises)."""
     root, auto_yes, state = ctx["root"], ctx["auto_yes"], ctx["state"]
@@ -700,15 +720,22 @@ def call_tool(name, args, ctx):
             return now()
         if name == "calc":
             return calc(args.get("expression", ""))
-        if name == "python":
-            code = str(args.get("code", ""))
-            why = _refused("python -c %r" % (code[:120],), auto_yes)
+        if name in ("python", "shell"):
+            try:
+                sandbox = _load_sandbox()
+            except Exception as e:
+                return "could not load localgpu/sandbox_exec.py: %s" % e
+            deps = [str(d) for d in (args.get("deps") or [])]
+            net = bool(args.get("net"))
+            what = "%s with %s" % (name, "network on" if net else "a deps install (network for pip)")
+            why = _refused(what, auto_yes) if (deps or net) else None
             if why:
                 return why
-            r = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True,
-                               text=True, timeout=120)
-            out = ((r.stdout or "") + (r.stderr or ""))[:MAX_OUT]
-            return "exit %d\n%s" % (r.returncode, out or "(no output)")
+            return sandbox.run(code=args.get("code") if name == "python" else None,
+                               command=args.get("command") if name == "shell" else None,
+                               files=args.get("files"), deps=deps,
+                               timeout=int(args.get("timeout") or 30), net=net, root=root,
+                               mounts=ctx.get("mounts", ()))
         if name == "remember":
             return remember(args.get("text", ""))
         if name == "recall":
@@ -807,7 +834,7 @@ def stream(base, model, messages, tools=None, temp=None):
 
 
 def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None,
-        pin="", auto=True, temp=None, examples=True):
+        pin="", auto=True, temp=None, examples=True, mounts=()):
     """Interactive chat.
 
     tools: turn the tool harness on.  pin: "all" or a comma list of bundles/tool names to load up
@@ -822,7 +849,7 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
     pins = set()
     for w in str(pin or "").split(","):
         pins |= resolve(w)
-    state = {"pinned": sorted(pins), "auto": bool(auto)}
+    state = {"pinned": sorted(pins), "auto": bool(auto), "mounts": list(mounts)}
     sys_prompt = system or (SYSTEM_BASE + (SYSTEM_TOOLS if harness else ""))
     prefix = ([{"role": "system", "content": sys_prompt}] if sys_prompt else []) + \
              (list(FORMAT_SHOT) if examples else [])
@@ -830,7 +857,8 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
 
     def turn(text=""):
         """One user turn: stream, run any tool calls, repeat until the model answers."""
-        ctx = {"root": root, "auto_yes": auto_yes, "state": state}
+        ctx = {"root": root, "auto_yes": auto_yes, "state": state,
+               "mounts": tuple(state.get("mounts", ()))}
         for _ in range(MAX_ITER):
             names = active_names(state, text) if harness else set()
             reply, calls = stream(base, model, messages, tools=tool_defs(names) if harness else None,
@@ -939,6 +967,20 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
                 state["pinned"] = sorted((set(state["pinned"]) | got) if load
                                          else (set(state["pinned"]) - got))
                 print("(%s %s: %s)" % ("loaded" if load else "unloaded", w, ", ".join(sorted(got))))
+            continue
+        if cmd == "/mount" or cmd.startswith("/mount "):
+            arg = cmd[6:].strip()
+            if arg:
+                try:
+                    added = _load_sandbox().parse_mounts(arg)
+                except Exception as e:
+                    print("(could not parse that mount: %s)" % e); continue
+                state["mounts"] = list(state.get("mounts", [])) + list(added)
+                for h, t, ro in added:
+                    print("(sandbox will see %s at /mnt/%s%s)" % (h, t, ":ro" if ro else ""))
+            cur = state.get("mounts", [])
+            print("\n".join("  %s -> /mnt/%s%s" % (h, t, ", read-only" if ro else ", read-write")
+                            for h, t, ro in cur) or "  (no host folders shared)")
             continue
         if cmd == "/auto":
             state["auto"] = not state["auto"]
