@@ -136,6 +136,53 @@ and indices, CoinGecko for crypto pairs.  One measured gotcha worth keeping: Yah
 **429 to a full browser User-Agent but 200 to a plain `Mozilla/5.0`**, same request -- the finance
 fetches therefore send the short one.
 
+## Thinking is the cost, not the answer
+
+On this card decode runs at ~13 tok/s, so the price of a turn is the tokens the model *thinks*, and
+the stock question "what is the stock price for docn?" made a good specimen: one tool call plus a
+one-line answer cost **270 generated tokens and ~21 s** in the session, of which the answer itself
+was ~25 tokens.
+
+Where it went (each config replayed the same prompt through the harness loop -- request, run the
+tool, request again -- measuring `reasoning_content` against `content`; temp 1.0 is the server
+default the client used to inherit):
+
+| prompt shape | temp | generated | of which thinking | answer | wall | round trips |
+|---|---|---|---|---|---|---|
+| original prompt | 1.0 | 236 | 169 | 29 | 18.8 s | 2 |
+| original prompt | 0.0 | 139 | 87 | 16 | 10.3 s | 2 |
+| terse prompt | 0.0 | 202 | 134 | 16 | 14.9 s | 2 |
+| **terse + terse-answer few-shot** | **0.0** | **156** | 108 | 9 | **9.6 s** | 2 |
+
+And on a question that needs no tool ("how many seconds are in 3 days?") the difference is not a
+percentage but a failure: the original prompt **never answered** -- 643 tokens, 3 round trips, 50.7 s
+-- while terse + few-shot answered in **10 tokens and 1 s** with no thinking channel at all.
+
+What the three changes actually are:
+
+1. **Send a temperature.** The client sent none, so llama-server's own default (1.0) applied; 0.0 is
+   what a tool-calling agent wants and it halved the thinking.  `--temp` / `LOCAL_GPU_TEMP`, or
+   `/temp` in the session.
+2. **Stop writing a numbered rule list in the system prompt.** The old prompt enumerated its rules
+   ("use a tool when...", "use the result verbatim", "state assumptions") and the model mirrored them
+   back as a *constraint checklist with a confidence score* inside its thinking -- ~80 tokens every
+   turn.  The prompt is now two sentences.
+3. **Give a terse-answer few-shot** (`FORMAT_SHOT`) that demonstrates the answer format *without*
+   demonstrating a tool call.  A few-shot that showed a tool call scored about the same on the tool
+   question but taught the model to call a tool for arithmetic it could do itself -- and every extra
+   round trip pays for another thinking block.
+
+Ruled out, on evidence rather than taste:
+
+- **`chat_template_kwargs: {"enable_thinking": false}`** -- the model's template opens the thinking
+  channel when `enable_thinking or tools or the first message is a system turn`, i.e. offering any
+  tool forces it on.  Passing false does suppress the channel and the model then returns an *empty*
+  answer to a tool question and a wrong one ("86400" for three days).  Not a lever.
+- **`--reasoning-effort`** -- this build accepts it, but the template never reads it, so it is a
+  no-op for this model.  Verified by grepping the template from `/props`.
+- **Sending no system prompt at all** -- the most verbose result of the lot (~380 generated tokens on
+  the stock question).
+
 ## Layout
 
 | Path | What |

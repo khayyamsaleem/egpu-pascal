@@ -105,6 +105,7 @@ COMMANDS = {
     "/unload": "/unload web -- drop them again",
     "/auto": "toggle loading a bundle just because the wording matches it",
     "/yes": "toggle the write_file/run_command/python confirmation",
+    "/temp": "/temp [0..2] -- sampling temperature; lower is shorter thinking (default 0)",
     "/help": "/help [fuzzy] -- this list, ranked by your query",
 }
 ALIASES = {"/quit": "/exit", "/bye": "/exit", "/?": "/help", "/h": "/help", "/cmds": "/help"}
@@ -199,14 +200,28 @@ def setup_readline():
     return True
 
 
+# The server's own default (1.0) makes the model ramble in its thinking channel: measured on the
+# "what is the stock price for docn?" turn, temperature 1.0 burned ~270 generated tokens where 0.0
+# burned ~139 for the same answer.  The harness used to send no temperature at all.
+TEMP = float(os.environ.get("LOCAL_GPU_TEMP", "0.0"))
+# Short, and deliberately not a numbered rule list -- an earlier prompt enumerated its rules and the
+# model mirrored them back as a "constraint checklist" inside its thinking, at ~80 tokens a go.
 SYSTEM_BASE = (
-    "You are a careful engineering assistant running locally on a GTX 1080 Ti. Use a tool when it "
-    "answers the question better than guessing, and use its result verbatim instead of inventing "
-    "one. Keep answers short and state assumptions.")
+    "You are a careful engineering assistant running locally on a GTX 1080 Ti. Answer in one short "
+    "line: no preamble, no plan, no checklist, no confidence score. Never restate a tool result -- "
+    "the user can already see it.")
 SYSTEM_TOOLS = (
-    " Tools are loaded on demand. Call use_tools to load more; bundles: %s. A tool you need but "
-    "have not loaded can also just be called -- it will be loaded and you can call it again."
-    % "; ".join("%s (%s)" % (b, d) for b, d in BUNDLES.items()))
+    " Tools are loaded on demand: use_tools loads the rest (bundles: %s). Calling a tool that is "
+    "not loaded loads it, and you can call it again." % "; ".join(BUNDLES))
+# Shows the *answer format* only.  A few-shot that demonstrated a tool call worked slightly better on
+# the tool question but pushed the model into calling a tool for arithmetic it could do itself, which
+# costs a whole extra round trip -- and every round trip pays for another thinking block.
+FORMAT_SHOT = [
+    {"role": "user", "content": "how many seconds are in an hour?"},
+    {"role": "assistant", "content": "3,600."},
+    {"role": "user", "content": "and how big is 5 GiB in bytes?"},
+    {"role": "assistant", "content": "5,368,709,120 bytes."},
+]
 
 WEATHER = {"tokyo": "14 C, light rain", "paris": "9 C, overcast", "san francisco": "17 C, fog",
            "new york": "11 C, clear"}
@@ -741,8 +756,9 @@ def call_tool(name, args, ctx):
         return "error running %s: %s: %s" % (name, type(e).__name__, e)
 
 
-def stream(base, model, messages, tools=None):
+def stream(base, model, messages, tools=None, temp=None):
     req_body = {"model": model, "messages": messages, "stream": True,
+                "temperature": TEMP if temp is None else temp,
                 "stream_options": {"include_usage": True}}
     if tools:
         req_body["tools"] = tools
@@ -791,28 +807,34 @@ def stream(base, model, messages, tools=None):
 
 
 def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None,
-        pin="", auto=True):
+        pin="", auto=True, temp=None, examples=True):
     """Interactive chat.
 
     tools: turn the tool harness on.  pin: "all" or a comma list of bundles/tool names to load up
     front ("" = nothing, conditional loading only).  auto: let the user's wording load bundles.
+    temp: sampling temperature (default 0.0 -- the server's 1.0 makes the model ramble).
+    examples: include the terse-answer few-shot (FORMAT_SHOT) in the prompt prefix.
     """
     root = root or os.getcwd()
     harness = bool(tools)
     auto_yes = bool(yes)
+    temperature = TEMP if temp is None else float(temp)
     pins = set()
     for w in str(pin or "").split(","):
         pins |= resolve(w)
     state = {"pinned": sorted(pins), "auto": bool(auto)}
     sys_prompt = system or (SYSTEM_BASE + (SYSTEM_TOOLS if harness else ""))
-    messages = [{"role": "system", "content": sys_prompt}] if sys_prompt else []
+    prefix = ([{"role": "system", "content": sys_prompt}] if sys_prompt else []) + \
+             (list(FORMAT_SHOT) if examples else [])
+    messages: list = list(prefix)
 
     def turn(text=""):
         """One user turn: stream, run any tool calls, repeat until the model answers."""
         ctx = {"root": root, "auto_yes": auto_yes, "state": state}
         for _ in range(MAX_ITER):
             names = active_names(state, text) if harness else set()
-            reply, calls = stream(base, model, messages, tools=tool_defs(names) if harness else None)
+            reply, calls = stream(base, model, messages, tools=tool_defs(names) if harness else None,
+                                  temp=temperature)
             if not calls:
                 messages.append({"role": "assistant", "content": reply})
                 return
@@ -862,6 +884,7 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
                    + ((" -- pinned: " + ", ".join(state["pinned"])) if state["pinned"] else ""))
              if harness else "off (/tools on)",
              "no confirmations" if auto_yes else "write/run ask first (/yes)", root, RESET))
+    print("%stemperature %.2f%s%s" % (DIM, temperature, "" if examples else ", no few-shot", RESET))
     while True:
         try:
             line = input("\n> ")
@@ -884,10 +907,21 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
         if cmd in ("/exit", "/quit", "/bye"):
             return
         if cmd == "/clear":
-            messages = [m for m in messages if m["role"] == "system"]; print("(cleared)"); continue
+            messages = list(prefix); print("(cleared)"); continue
         if cmd.startswith("/system "):
-            messages = [{"role": "system", "content": cmd[8:]}] + [m for m in messages if m["role"] != "system"]
+            tail = [m for m in messages[len(prefix):] if m.get("role") != "system"]
+            prefix = [{"role": "system", "content": cmd[8:]}] + (list(FORMAT_SHOT) if examples else [])
+            messages = list(prefix) + tail
             print("(system prompt set)"); continue
+        if cmd == "/temp" or cmd.startswith("/temp "):
+            arg = cmd[5:].strip()
+            if arg:
+                try:
+                    temperature = max(0.0, min(2.0, float(arg)))
+                except ValueError:
+                    print("(temperature must be a number)"); continue
+            print("(temperature %.2f -- lower means shorter thinking; 0 is the default)" % temperature)
+            continue
         if cmd == "/tools" or cmd.startswith("/tools "):
             arg = cmd[6:].strip().lower()
             if arg in ("on", "off"):

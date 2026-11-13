@@ -483,17 +483,23 @@ def cmd_chat(a, prompt=None):
     chat.run("http://127.0.0.1:%d/v1" % PROXY_PORT, cur["model"], prompt=prompt, system=a.system,
              tools=getattr(a, "tools", None) is not None, yes=getattr(a, "yes", False),
              root=getattr(a, "root", None) or REPO,
-             pin=getattr(a, "tools", None) or "", auto=not getattr(a, "no_auto", False))
+             pin=getattr(a, "tools", None) or "", auto=not getattr(a, "no_auto", False),
+             temp=getattr(a, "temp", None), examples=not getattr(a, "no_examples", False))
 
 
 def _harness_args(p):
     p.add_argument("--tools", nargs="?", const="", default=None, metavar="BUNDLES",
                    help="tool harness: conditional loading only (=all pins every bundle, "
-                        "=web,repo pins those; bundles: web, repo, compute, edit, memory, time, demo)")
+                        "=web,repo pins those; bundles: web, repo, compute, market, edit, memory, time, demo)")
     p.add_argument("--no-auto", action="store_true",
                    help="with --tools: do not load a bundle just because the wording matches")
     p.add_argument("--yes", action="store_true", help="with --tools: skip the write/run confirmation")
     p.add_argument("--root", default=None, help="with --tools: directory file tools are confined to")
+    p.add_argument("--temp", type=float, default=None,
+                   help="sampling temperature (default 0: the server's 1.0 makes the model ramble in "
+                        "its thinking channel; env LOCAL_GPU_TEMP)")
+    p.add_argument("--no-examples", action="store_true",
+                   help="do not put the terse-answer few-shot in the prompt prefix")
     return p
 
 
