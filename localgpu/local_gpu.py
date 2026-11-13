@@ -487,9 +487,9 @@ def cmd_chat(a, prompt=None):
 
 
 def _harness_args(p):
-    p.add_argument("--tools", nargs="?", const="all", default=None, metavar="BUNDLES",
-                   help="tool harness: conditional loading only; =all pins every bundle, "
-                        "=web,repo pins those (bundles: web, repo, compute, edit, memory, time, demo)")
+    p.add_argument("--tools", nargs="?", const="", default=None, metavar="BUNDLES",
+                   help="tool harness: conditional loading only (=all pins every bundle, "
+                        "=web,repo pins those; bundles: web, repo, compute, edit, memory, time, demo)")
     p.add_argument("--no-auto", action="store_true",
                    help="with --tools: do not load a bundle just because the wording matches")
     p.add_argument("--yes", action="store_true", help="with --tools: skip the write/run confirmation")

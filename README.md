@@ -116,6 +116,10 @@ and what is pinned, `/load web`, `/unload repo`, `/load all`, `/auto` toggles th
 heuristic, `/yes` toggles confirmations.  `--tools=all` pins everything up front, `--tools=web,repo`
 pins just those, `--no-auto` turns the keyword heuristic off.
 
+Slash commands autocomplete: `/` then TAB lists every command, TAB completes command names and the
+bundle/tool names after `/load`/`/unload` (an ambiguous TAB prints the candidates), `/help <fuzzy>`
+ranks the commands by a query, and a typo gets a did-you-mean.  Up-arrow history comes with it.
+
 Checked on the card (session 14): "how many seconds are in 3 days, with the calc tool" loaded
 `compute` and called `calc` -> 259200; "what is the current time" loaded `time` and called `now`;
 asking for Python loaded `edit` on demand, got the confirmation refusal, and re-ran the arithmetic

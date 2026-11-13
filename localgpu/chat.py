@@ -1,7 +1,9 @@
 """Streaming terminal chat over an OpenAI-compatible endpoint (used by `local-gpu chat`).
 
-Commands: /exit, /clear, /system <text>, /tools, /load, /unload, /auto, /yes, \"\"\" for multi-line.
-Thinking (reasoning_content) is shown dimmed.  Standard library only.
+Commands: /exit, /clear, /system <text>, /tools, /load, /unload, /auto, /yes, /help.  Type `/` and
+press TAB to list them all (TAB completes commands, and bundle/tool names after /load and /unload;
+an ambiguous TAB prints the candidates), `/help <fuzzy>` ranks them by a query, and an unknown
+command gets a did-you-mean.  Thinking (reasoning_content) is shown dimmed.  Standard library only.
 
 Tools are a **registry, not a fixed list**: every tool belongs to a bundle (web, repo, compute, edit,
 memory, time, demo) and only the active ones are sent in a request, so the prompt stays small.
@@ -88,6 +90,110 @@ def active_names(state, text=""):
         hit = {b for b, kws in BUNDLE_KEYWORDS.items() if any(k in low for k in kws)}
         names |= names_in_bundles(hit)
     return names
+
+
+# ---------------------------------------------------------------- slash commands
+COMMANDS = {
+    "/exit": "leave the session (also /quit, /bye)",
+    "/clear": "forget the conversation, keep the system prompt",
+    "/system": "/system <text> -- replace the system prompt",
+    "/tools": "/tools [on|off] -- list the tool bundles, or switch the harness",
+    "/load": "/load web,repo -- pin bundles or single tools (also: all)",
+    "/unload": "/unload web -- drop them again",
+    "/auto": "toggle loading a bundle just because the wording matches it",
+    "/yes": "toggle the write_file/run_command/python confirmation",
+    "/help": "/help [fuzzy] -- this list, ranked by your query",
+}
+ALIASES = {"/quit": "/exit", "/bye": "/exit", "/?": "/help", "/h": "/help", "/cmds": "/help"}
+
+
+def fuzzy_score(needle, haystack):
+    """Subsequence score, fzf-ish: runs of consecutive characters and segment starts score higher.
+    None when the needle is not a subsequence of the haystack."""
+    n, h = str(needle).lower(), str(haystack).lower()
+    if not n:
+        return 0
+    score, i, run = 0, 0, 0
+    for ch in n:
+        j = h.find(ch, i)
+        if j < 0:
+            return None
+        if j == i:
+            run += 1
+            score += 2 * run                      # keeping the letters together
+        else:
+            run, score = 0, score + 1
+        if j == 0 or h[j - 1] in "/-_ ":
+            score += 3                            # a segment start
+        i = j + 1
+    return score - (len(h) - len(n)) // 4          # prefer the shorter candidate, mildly
+
+
+def fuzzy_rank(query, candidates):
+    """Candidates that match `query` as a subsequence, best first."""
+    hits = [(-s, c) for c in candidates if (s := fuzzy_score(query, c)) is not None]
+    return [c for _, c in sorted(hits)]
+
+
+def help_text(query=""):
+    names = list(COMMANDS)
+    if query:
+        names = fuzzy_rank(query, names)
+        if not names:
+            return "no command matches %r -- /help lists them all" % query
+    return "\n".join("  %-9s %s" % (c, COMMANDS[c]) for c in names)
+
+
+def completions(line):
+    """TAB candidates for the current line: command names, or bundles/tools for /load and /unload."""
+    if not line.startswith("/"):
+        return []
+    head, sep, tail = line.partition(" ")
+    if not sep:
+        names = sorted(set(COMMANDS) | set(ALIASES))
+        return [c for c in names if c.startswith(head)] or fuzzy_rank(head[1:], names)
+    if head in ("/load", "/unload"):
+        pre, comma, part = tail.rpartition(",")
+        opts = sorted(set(BUNDLES) | set(_registry) | {"all"})
+        return [pre + comma + o for o in opts if o.startswith(part)]
+    return []
+
+
+def _columns(items, width=78):
+    """Pack candidates into columns the way `ls` would."""
+    pad = max(len(i) for i in items) + 2
+    per = max(1, width // pad)
+    return "\n".join("".join(i.ljust(pad) for i in items[i:i + per]).rstrip()
+                     for i in range(0, len(items), per))
+
+
+def setup_readline():
+    """TAB completion (and up-arrow history) for the slash commands.  macOS Python links libedit,
+    which needs the `bind ^I rl_complete` form as well as the GNU one.  libedit itself only beeps
+    when a TAB is ambiguous, so an ambiguous TAB prints the candidates here instead."""
+    try:
+        import readline
+    except ImportError:
+        return False
+
+    def completer(text, state):
+        hits = completions(readline.get_line_buffer())
+        if state == 0 and len(hits) > 1:
+            print("\n%s%s%s" % (DIM, _columns(hits), RESET))
+        return hits[state] if state < len(hits) else None
+
+    readline.set_completer(completer)
+    readline.set_completer_delims(" \t\n")
+    for bind in ("tab: complete", "bind ^I rl_complete"):
+        try:
+            readline.parse_and_bind(bind)
+        except Exception:
+            pass
+    try:
+        readline.set_history_length(500)
+    except Exception:
+        pass
+    return True
 
 
 SYSTEM_BASE = (
@@ -550,22 +656,26 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
         messages.append({"role": "assistant", "content": "(stopped: too many tool calls)"})
 
     def tool_report():
-        marks = "pinned: %s | auto-load: %s" % (", ".join(state["pinned"]) or "none",
-                                                "on" if state["auto"] else "off")
-        print("%s%s%s" % (DIM, marks, RESET))
-        for b in list(BUNDLES) + [None]:
-            ts = [n for n, t in _registry.items() if t["bundle"] == b]
-            what = BUNDLES[b] if b else "always available"
-            print("  %-8s %-32s %s" % (b or "(core)", ",".join(sorted(ts)), what))
+        """What the harness knows and what it is sending (bare /tools, or /tools list)."""
+        print("%stool harness %s | pinned: %s | loaded by wording: %s%s"
+              % (DIM, "ON" if harness else "off", ", ".join(state["pinned"]) or "none",
+                 "on" if state["auto"] else "off", RESET))
+        rows = [("(always)", [SUMMONER], "the summoner -- use_tools loads anything below")]
+        rows += [(b, sorted(n for n, t in _registry.items() if t["bundle"] == b), BUNDLES[b])
+                 for b in BUNDLES]
+        for b, ts, what in rows:
+            print("  %-9s %-40s %s" % (b, ",".join(ts), what))
 
     if prompt:
         messages.append({"role": "user", "content": prompt})
         turn(prompt)
         return
-    print("%schatting with %s on the GTX 1080 Ti -- /exit, /clear, /system <text>, /tools, /load, "
-          "/unload, /auto, /yes, \"\"\" for multi-line%s" % (DIM, model, RESET))
+    tab = setup_readline() if sys.stdin.isatty() else False
+    print("%schatting with %s on the GTX 1080 Ti -- /help lists the commands%s; \"\"\" for "
+          "multi-line%s" % (DIM, model, ", TAB completes them" if tab else "", RESET))
     print("%stool harness %s -- %s; root %s%s"
-          % (DIM, ("on, %s" % ("pinned: " + (", ".join(state["pinned"]) or "none")))
+          % (DIM, ("on (loads per message; /tools lists, /load pins)"
+                   + ((" -- pinned: " + ", ".join(state["pinned"])) if state["pinned"] else ""))
              if harness else "off (/tools on)",
              "no confirmations" if auto_yes else "write/run ask first (/yes)", root, RESET))
     while True:
@@ -582,6 +692,11 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
                 lines.append(l)
             line = "\n".join(lines)
         cmd = line.strip()
+        first, _, rest = cmd.partition(" ")
+        first = ALIASES.get(first, first)          # /quit, /?, /cmds ...
+        cmd = ("%s %s" % (first, rest)).strip() if rest else first
+        if cmd in ("/", "/help") or cmd.startswith("/help "):
+            print(help_text(cmd[5:].strip() if cmd.startswith("/help ") else "")); continue
         if cmd in ("/exit", "/quit", "/bye"):
             return
         if cmd == "/clear":
@@ -593,15 +708,12 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
             arg = cmd[6:].strip().lower()
             if arg in ("on", "off"):
                 harness = arg == "on"
-            elif arg:
-                tool_report()
-                continue
-            else:
-                harness = not harness
-            print("(tool harness %s)" % ("ON" if harness else "off")); continue
+                print("(tool harness %s)" % ("ON" if harness else "off")); continue
+            tool_report(); continue
         if cmd.startswith("/load ") or cmd.startswith("/unload "):
             load = cmd.startswith("/load ")
             words = [w for w in cmd.split()[1].split(",") if w]
+            harness = harness or load          # /load implies the harness
             for w in words:
                 got = resolve(w)
                 if not got:
@@ -616,6 +728,11 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
         if cmd == "/yes":
             auto_yes = not auto_yes
             print("(confirmations %s)" % ("off: write/run execute immediately" if auto_yes else "on")); continue
+        if cmd.startswith("/"):
+            near = fuzzy_rank(cmd.split()[0][1:], list(COMMANDS))
+            print("(unknown command %s%s -- /help lists them all)"
+                  % (cmd.split()[0], (" -- did you mean %s?" % ", ".join(near[:3])) if near else ""))
+            continue
         if not cmd:
             continue
         messages.append({"role": "user", "content": line})
