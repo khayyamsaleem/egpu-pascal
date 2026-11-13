@@ -1,9 +1,12 @@
 # docs/ — the evidence trail
 
-Chronological, written while working; `../RESULTS.md` is the compiled summary.
+Chronological, written while working; `../RESULTS.md` is the compiled summary. Start with
+**[HOW-IT-WORKS.md](HOW-IT-WORKS.md)** for the architecture in one page: what runs where, the
+path a launch takes, and how to tell the card did the work.
 
 | File | Was (before the repo) | Contents |
 |---|---|---|
+| `HOW-IT-WORKS.md` | — | the short architecture guide: the four layers, a launch end to end, how to verify on-card execution |
 | `evidence-log.md` | `MMU-AND-ACR.md` | sessions 3–6: every measurement, trace, disassembly and negative result |
 | `FINDINGS.md` | same | sessions 1–4 headlines, environment, the original "where it stops" |
 | `PHASE0-PROGRESS.md` | same | session 2: BAR0 writes, engine gating, falcon map |

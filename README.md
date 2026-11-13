@@ -4,30 +4,37 @@ A from-scratch, user-space bring-up of an **NVIDIA GTX 1080 Ti (GP102, Pascal)**
 Thunderbolt enclosure on an **Apple Silicon MacBook Air**. It needs no NVIDIA driver and
 runs over tinygrad's TinyGPU DriverKit transport.
 
-**Status (2026-11-12):** the card POSTs from macOS, secure-boots its graphics firmware,
+**Status (2026-11-13):** the card POSTs from macOS, secure-boots its graphics firmware,
 and runs **ptxas-compiled sm_61 CUDA kernels** dispatched through our own channel/QMD code.
 Two runtimes reach it through a libcuda/NVML shim over TinyGPU:
 
 * **Modular MAX** (via [`maxpatch/`](maxpatch/)): SmolLM2-135M fp32 (text identical to
   MAX-on-CPU) and **Gemma 4 E2B** bf16 — "The capital of France is **Paris**." as transformers
-  gives it, and 200 ms/token since launches became asynchronous (was 529).
+  gives it, and 200 ms/token since launches became asynchronous (was 529); int8 weights (patch
+  0004) take that to 13.4 tok/s decode / 37.7 tok/s prefill with byte-identical text.
 * **llama.cpp** (via `shim/cudart` + `shim/cublas`): SmolLM2-135M Q4_0 at 61 tok/s
-  generation / 447 tok/s prompt, and `test-backend-ops` 10,000+ cases with 0 failures.
-  **Gemma 4 E4B (QAT Q4_0) at ~13 tok/s** with tool calling — the serving path, and the one the
-  chat harness rides on. Only ~25 of those tokens-per-turn are the answer; the rest is the model's
-  thinking, which is what [Thinking is the cost](#thinking-is-the-cost-not-the-answer) is about.
+  generation / 447 tok/s prompt, and `test-backend-ops` 20,290 cases with 0 failures.
+  **Gemma 4 E4B (QAT Q4_0) at ~13 tok/s** with tool calling and its vision projector — the
+  serving path, and the one the chat harness and Hermes ride on. Only ~25 of those tokens-per-turn
+  are the answer; the rest is the model's thinking, which is what
+  [Thinking is the cost](#thinking-is-the-cost-not-the-answer) is about.
 
 **The memory is reclocked** from the 405 MHz boot clock to **1080 MHz** (31 -> 87 GB/s), the
 first Pascal memory reclock by an open driver (`pascal/mclk.py`; RESULTS.md section 10). The
-VBIOS bands above 1134 MHz are out of reach on that (refpll) path — band 2 never completes DRAM
-training and the first GPU work after it hangs — so the next lever is the memory PLL the high
-bands need (RESULTS.md section 12). The SM clock stays at its 607 MHz boot value: the FLL route
-needs a voltage change, which needs an explicit OK first.
+VBIOS bands above 1134 MHz are out of reach: band 2 never completes DRAM training and the first
+GPU work after it hangs. The memory PLL (`0x132000`) was then ported and measured — it *does*
+steer the memory clock (a 1350 target reaches 593 f_CK), so band 2's wall is the timing/training
+side, not a missing PLL — but the memory is **no longer the constraint**: decode already moves 75%
+of the achievable bandwidth, so 1134 MHz's extra 5% buys nothing end to end and the card is bound
+by its **607 MHz SM clock and ~900 launches per token** (RESULTS.md sections 13 and 15; the SM
+clock is not host-writable, so the remaining avenue is the PMU voltage/frequency path).
 
 [`bin/local-gpu`](localgpu/) brings the whole stack up with one command: card init if it is
 cold, the driver server, the right container, a resumable model download, an Ollama-compatible
-endpoint on `127.0.0.1:11434`, and a terminal chat. Full results: **[RESULTS.md](RESULTS.md)**;
-what is in flight: **[docs/handoffs/HANDOFF-TO-OPUS.md](docs/handoffs/HANDOFF-TO-OPUS.md)**.
+endpoint on `127.0.0.1:11434`, and a terminal chat. How the pieces fit together, and how to tell
+the card did the work: **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)**. Full results:
+**[RESULTS.md](RESULTS.md)**; what is in flight:
+**[docs/handoffs/HANDOFF-TO-OPUS.md](docs/handoffs/HANDOFF-TO-OPUS.md)**.
 
 ```
 rung 0  transport + VBIOS POST from macOS + 11 GB VRAM   DONE
@@ -39,8 +46,9 @@ rung 5  model inference: llama.cpp (QAT 4-bit, tool calling), MAX (SmolLM2, Gemm
 ```
 
 **llama.cpp is the serving path**, on quantized weights; MAX stays for what only it can do (bf16
-checkpoints) and as the thing that exercised the libcuda shim hardest — its decode is ~4-5 tok/s
-against llama.cpp's ~13, because it has no int4 path for Pascal and GP102 has no tensor cores.
+checkpoints) and as the thing that exercised the libcuda shim hardest — it has no int4 path for
+Pascal (GP102 has no tensor cores), so it pays roughly twice the weight bytes: Gemma 4 E2B is
+9.8 tok/s in bf16 and 13.4 tok/s with int8 weights (patch 0004).
 
 ## Requirements
 
@@ -196,8 +204,9 @@ model_aliases:
 
 Then `local-gpu serve` and `hermes chat -m local`, `/model local` in a running session, or pick
 **local-gpu / gemma4-e4b** in the model picker. Hermes needs a 64K context, which is why 65,536 is
-the default for this model. Its ~14K-token system prompt costs ~35 s of prefill on the first turn
-after a server start; later turns reuse the cache.
+the default for this model. Its default prompt is ~13.9K tokens (~10.4K of that JSON tool
+schemas), which the card prefills at ~560 tok/s: ~25 s of prompt processing, ~35 s to the first
+token on a cold server (RESULTS.md section 17); later turns reuse the cache.
 
 Use **`bin/hermes-local`** rather than bare `hermes chat -m local`: it checks the endpoint and then
 launches the same session with a four-tool surface (`file,terminal,code_execution,web`), which is
@@ -312,7 +321,7 @@ Ruled out, on evidence rather than taste:
 | `kernels/` | PTX sources, built sm_61 cubins, `Dockerfile` + `build.sh` |
 | `shim/` | `libcuda.so.1` + `libnvidia-ml.so.1` replacements for MAX (Linux container), `cudart/` + `cublas/` for llama.cpp, and their tests |
 | `localgpu/` | `local-gpu`: card/stack bring-up, model fetch, Ollama + OpenAI proxy, terminal chat (plain, or `--tools` for the tool harness: bundles loaded on demand), multi-turn bench |
-| `bin/` | `local-gpu`, `gpu-chat`, `gpu-chat-tools` — the launchers, including the Ghostty window |
+| `bin/` | `local-gpu`, `gpu-chat`, `gpu-chat-tools`, `hermes-local` — the launchers, including the Ghostty window and the lean-toolset Hermes session ([HOW-IT-WORKS](docs/HOW-IT-WORKS.md)) |
 | `sandbox/` | the code sandbox's image and notes ([README](sandbox/README.md)); the mechanics are `localgpu/hvi_guest.py` (guest image + virtio-fs run protocol) and `localgpu/sandbox_exec.py` (backends, mounts, deps) |
 | `llama/` | llama.cpp build for sm_61 (`--no-compress`, no VMM, no CUDA graphs) and its container |
 | `maxpatch/` | the local MAX patches for sm_61 (and the `w8_linear` int8 custom-op kernel) + their installer |
