@@ -166,6 +166,11 @@ years, daily beyond) and the window shrinks with it; and when the requested minu
 such** rather than passed off as exact.  Verified: AAPL `2026-11-10` returns 348.51 / O 351.35 /
 H 353.87 / L 346.46 from Yahoo, matching Nasdaq's own history rows to the cent.
 
+For a *series* rather than one price there is `stock_history(symbols, days=7)`: the daily
+open/high/low/close/volume rows for the last N trading days, returned as CSV
+(`date,open,high,low,close,volume`) in **one** request per symbol, which is what a chart or a trend
+question wants -- seven `stock_quote` calls would be seven round trips for the same numbers.
+
 ## Running code: the sandbox
 
 The model can write and run code without the question "may I run this?" having to be "only if I read
@@ -184,9 +189,27 @@ or `/mount` in a session — and appear at `/mnt/<tag>`; there is deliberately n
 mount, so the model cannot ask for `~/.ssh`.
 
 Dependencies: numpy pandas matplotlib scipy sympy tabulate requests bs4 lxml pyyaml dateutil are
-preinstalled, and `deps=["pkg"]` pip-installs into the shared deps dir, which one install serves to
-both backends.  `bin/local-gpu sandbox --status | --guest | --build | --reset | --shell`; full notes
-in [sandbox/README.md](sandbox/README.md).
+preinstalled **in both backends, from one list** (`APK_SEED`/`PIP_SEED`) so they cannot drift, and
+`deps=["pkg"]` pip-installs into a per-backend deps dir (glibc for the container, musl for the
+guest -- a glibc wheel on the guest's `PYTHONPATH` breaks every import, which is exactly how that
+was learned).  `sandbox --seed data|plot|web|text|math` pre-loads a named set.  Files a run leaves
+in `/work` are listed back with their host paths, and the `show` tool opens one on the Mac (asks
+first, and only inside the work dir).  `bin/local-gpu sandbox --status | --guest | --build | --seed
+| --reset | --shell`; full notes in [sandbox/README.md](sandbox/README.md).
+
+Worked example -- the task this harness was measured against ("review DOCN's open and close every day
+for the last seven days, chart it with python, open the image") runs end-to-end on the 1080 Ti with
+the E4B model in three tool calls and no hints from the human:
+
+    -> stock_history({"days": 7, "symbols": "DOCN"})        one request, 7 daily OHLCV rows as CSV
+    -> python({"code": "... candles.py --out /work/chart.png ..."})      0.6 s in the microVM
+    -> show({"path": "/work/chart.png"})                    "opened chart.png on the Mac (26733 bytes)"
+
+Getting there was almost entirely tool *interface* work, not model work -- small models drive a tool
+correctly only when the obvious invocation is the right one: the helper takes its CSV by path, by
+`--csv`, or on stdin (E4B tried all three), the guest has `python` as well as `python3`, the repo is
+at `/repo` in both backends rather than `/mnt/repo` in one, and `stock_history` emits a real header
+row so its output can be pasted straight into a file.  Each of those was a failed round trip first.
 
 Verified on the card: asked to read a host file mounted at `/mnt/data`, the model wrote Python that
 read it inside the guest (0.4 s) and printed its SHA-256 — which matched `shasum -a 256` on the Mac

@@ -493,7 +493,8 @@ def cmd_chat(a, prompt=None):
              root=getattr(a, "root", None) or REPO,
              pin=getattr(a, "tools", None) or "", auto=not getattr(a, "no_auto", False),
              temp=getattr(a, "temp", None), examples=not getattr(a, "no_examples", False),
-             mounts=chat._load_sandbox().parse_mounts(",".join(getattr(a, "mount", None) or [])))
+             mounts=chat._load_sandbox().parse_mounts(",".join(getattr(a, "mount", None) or [])),
+             initial_skills=getattr(a, "skill", None) or ())
 
 
 def _harness_args(p):
@@ -512,6 +513,9 @@ def _harness_args(p):
     p.add_argument("--mount", action="append", default=None, metavar="HOST[:TAG][:ro|rw]",
                    help="share a host folder into the code sandbox, read-only by default "
                         "(repeatable; also LOCAL_GPU_SANDBOX_MOUNTS, or /mount in a session)")
+    p.add_argument("--skill", action="append", default=None, metavar="NAME",
+                   help="attach a tool usage note up front (repeatable; they attach on their own "
+                        "when a bundle loads, so this is rarely needed)")
     return p
 
 

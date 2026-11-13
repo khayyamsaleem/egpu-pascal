@@ -54,8 +54,9 @@ if mount -t virtiofs deps /deps 2>/dev/null; then
   echo "DEPS-MOUNTED"
 fi
 for tag in $(cat /proc/cmdline | tr ' ' '\n' | grep -o 'egpu.mount=[a-z0-9_]*' | cut -d= -f2); do
-  mkdir -p /mnt/$tag
-  mount -t virtiofs $tag /mnt/$tag 2>/dev/null && echo "MOUNTED /mnt/$tag"
+  if [ "$tag" = "repo" ]; then dest=/repo; else dest=/mnt/$tag; fi
+  mkdir -p $dest
+  mount -t virtiofs $tag $dest 2>/dev/null && echo "MOUNTED $dest"
 done
 cd /work
 if [ -f /work/run.sh ]; then

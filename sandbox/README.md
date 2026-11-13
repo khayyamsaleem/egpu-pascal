@@ -72,9 +72,21 @@ The folder appears at `/mnt/<tag>` (`/mnt/data` above) in both backends. Verifie
 answers `Read-only file system` to a write, and a read-write mount's file shows up on the host
 afterwards.
 
+One tag is special: `repo` mounts at **`/repo`** in both backends, not `/mnt/repo`. It did differ —
+the guest's `/init` put every extra tag under `/mnt` — and a skill note that promised
+`/repo/sandbox/tools/candles.py` then failed inside the guest with *"No such file or directory"*.
+Anything you want a model to be able to run belongs in the repo (read-only, so the model cannot
+change it): `sandbox/tools/candles.py` is there for exactly that reason.
+
+The guest also carries `python` as well as `python3` (Alpine ships only the latter, the container
+image has both, and a model that types `python` otherwise gets a bare `command not found`).
+
 ## Getting dependencies
 
-Both backends ship the same curated set, so most questions need nothing:
+Both backends are built from **one list** (`sandbox_exec.APK_SEED` / `PIP_SEED`), so they cannot
+drift apart.  They did once — the guest was built without matplotlib while the tool description
+promised it, and the model spent three round trips discovering that — which is why the list now
+lives in exactly one place and each build stamps itself with it.
 
     numpy  pandas  matplotlib  scipy  sympy  tabulate  requests  beautifulsoup4  lxml  pyyaml
     python-dateutil
@@ -85,10 +97,33 @@ For anything else the tool takes `deps`, and the model is told to use it:
 python(code="import humanize; print(humanize.intcomma(1234567))", deps=["humanize"])
 ```
 
-That is `pip install --target` into `~/.local/state/local-gpu/sandbox/deps`, which both backends
-mount at `/deps` on `PYTHONPATH` — one install serves the container *and* every later guest. It is
-the only step that gets a network and it asks you first, because pip runs arbitrary code from the
-index.
+**Each backend has its own deps dir**, because they are different libcs: the container is Debian
+(glibc, manylinux wheels), the guest is Alpine (musl).  A glibc numpy sitting on the musl guest's
+`PYTHONPATH` shadows its working numpy and every import dies with *"No module named
+'numpy._core._multiarray_umath'"* — so `deps` installs run in a container matching the libc of the
+backend that will use them:
+
+    ~/.local/state/local-gpu/sandbox/deps/docker   glibc, for the container
+    ~/.local/state/local-gpu/sandbox/deps/guest    musl,  for the microVM
+
+Installing needs egress, so that step runs in a container even when the run itself is the guest; it
+asks you first, because pip runs arbitrary code from the index.
+
+### Pre-seeding
+
+One lean image per backend plus a deps dir is the right split for this machine: the guest is a
+~325 MB initramfs (it was 195 MB before matplotlib, scipy, bs4 and lxml were added to the list) that
+*every* call loads into RAM, so heavy stacks belong in the deps dir, not in the image.  `--seed`
+pre-loads a named set into both dirs so a session does not spend its first calls installing:
+
+    bin/local-gpu sandbox --seed plot     # mplfinance, seaborn, plotly, pillow
+    bin/local-gpu sandbox --seed data     # scikit-learn, statsmodels, duckdb, pyarrow, openpyxl
+    bin/local-gpu sandbox --seed web      # httpx, html5lib, feedparser, trafilatura
+    bin/local-gpu sandbox --seed text | math
+
+If you need *system* libraries no pip wheel can bring (libpq, ffmpeg, a compiler), that is the point
+at which a second guest image earns its keep — add it to `APK_SEED` and rebuild
+(`sandbox --guest`), rather than bolting it onto every call.
 
 Prepare it by hand when you know what a session will need:
 

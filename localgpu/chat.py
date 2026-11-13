@@ -49,9 +49,29 @@ BUNDLE_KEYWORDS = {
     "sandbox": ("python", "script", "pandas", "numpy", "matplotlib", "plot", "parse", "regex",
                 "sandbox", "unit test", "jupyter", "csv file", "dataframe", "parse this"),
     "market": ("stock", "ticker", "share price", "shares of", "market cap", "trading at",
-               "nasdaq", "nyse", "s&p", "exchange rate", "fx rate", "stock price", "quote for"),
+               "nasdaq", "nyse", "s&p", "exchange rate", "fx rate", "stock price", "quote for",
+               "candlestick", "last 7 days", "historical price", "price history"),
     "time": ("what time", "the date", "today's date", "what day", "utc"),
 }
+
+# Short usage notes ("skills") for tools whose *interface* is only half the story.  They are not in
+# the prompt by default: a note is attached to the system message only while a bundle that needs it
+# is active (BUNDLE_SKILLS), so a session that never runs code pays nothing for them.  Each note is
+# deliberately a handful of lines -- the tool schema says what the arguments are, these say how to
+# not waste a round trip with them.
+SKILLS = {
+    "python": (
+        "One self-contained script per call, no state between calls: print what you need back. "
+        "Helper modules go in files={'x.py': ...}. Batch deps=[...] -- each install asks the user. "
+        "Charts: matplotlib is installed, and a ready candlestick helper is in the repo: "
+        "python3 /repo/sandbox/tools/candles.py --out /work/chart.png < data.csv (takes the "
+        "stock_history CSV as-is). Use it rather than hand-rolling a candlestick."),
+    "sandbox": (
+        "Throwaway VM: no network, 512 MB, 30 s default timeout. Only /work persists; /repo is "
+        "read-only; /mnt/<tag> are folders the user shared."),
+}
+BUNDLE_SKILLS = {"sandbox": ("python", "sandbox")}
+SKILL_HEADER = "\n\nNotes for the tools you have loaded:\n"
 
 S = {"type": "string"}
 I = {"type": "integer"}
@@ -89,6 +109,20 @@ def resolve(word):
     return {w} if w in _registry else set()
 
 
+def _skill_text(names):
+    return "".join("- %s\n" % SKILLS[n] for n in sorted(names) if n in SKILLS)
+
+
+def _apply_skills(messages, state):
+    """Show exactly the attached notes at the end of the system message (idempotent: the base is
+    whatever precedes the header, so re-applying after a note changes replaces them cleanly)."""
+    if not messages or messages[0].get("role") != "system":
+        return
+    base = messages[0]["content"].split(SKILL_HEADER)[0]
+    notes = _skill_text(state.get("skills", ()))
+    messages[0]["content"] = base + ((SKILL_HEADER + notes) if notes else "")
+
+
 def active_names(state, text=""):
     """The tool set for one request: pinned + the summoner, plus keyword-matched bundles."""
     names = {SUMMONER} | set(state.get("pinned", ()))
@@ -111,6 +145,7 @@ COMMANDS = {
     "/yes": "toggle the write_file/run_command/python confirmation",
     "/temp": "/temp [0..2] -- sampling temperature; lower is shorter thinking (default 0)",
     "/mount": "/mount <host>[:<tag>][:ro|rw] -- share a host folder into the sandbox (ro default)",
+    "/skill": "/skill [name|none] -- attach/detach a tool's usage note (they auto-attach with a bundle)",
     "/help": "/help [fuzzy] -- this list, ranked by your query",
 }
 ALIASES = {"/quit": "/exit", "/bye": "/exit", "/?": "/help", "/h": "/help", "/cmds": "/help"}
@@ -265,6 +300,11 @@ register("stock_quote", "market",
          {"symbols": S, "detail": {"type": "boolean"}, "when": S}, ["symbols"])
 register("fx_rate", "market", "Exchange rates (ECB, via frankfurter.dev)",
          {"base": S, "to": S}, [])
+register("stock_history", "market",
+         "Daily open/high/low/close/volume for the last N trading days (default 7), returned as "
+         "CSV rows (date,open,high,low,close,volume) -- use this rather than one stock_quote per "
+         "day when you need a series, a trend or a chart. The sandbox has matplotlib.",
+         {"symbols": S, "days": I}, ["symbols"])
 # sandbox: code runs in a VM of its own (hvi microVM) or a locked-down container (localgpu/sandbox_exec.py)
 register("python", "sandbox",
          "Run Python 3.12 in a sandboxed machine of its own (no network, no host filesystem except "
@@ -277,6 +317,10 @@ register("python", "sandbox",
           "timeout": I, "net": {"type": "boolean"}}, ["code"])
 register("shell", "sandbox", "Run a shell command in the same sandboxed machine (sh -c)",
          {"command": S, "timeout": I, "net": {"type": "boolean"}}, ["command"])
+register("show", "sandbox",
+         "Open a file the sandbox wrote (e.g. /work/chart.png) on the Mac in its default app, so the "
+         "user can see it. Asks first; only files inside the sandbox work dir are allowed.",
+         {"path": S}, ["path"], gated=True)
 # memory
 register("remember", "memory", "Append a durable note (survives /clear and later sessions)",
          {"text": S}, ["text"])
@@ -445,10 +489,13 @@ def _chg(price, prev):
     return "%+.2f (%+.2f%%) vs prev close %s" % (d, p, _num(prev))
 
 
-def _yahoo_raw(sym):
+def _yahoo_raw(sym, p1=None, p2=None, interval="1d"):
     """One chart response.  Two things this endpoint needs: the plain UA (its edge 429s a full
-    browser one) and a host/backoff retry, because it rate-limits per IP on a burst."""
-    url = "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=1d"
+    browser one) and a host/backoff retry, because it rate-limits per IP on a burst.  Give p1/p2
+    for a historical window, otherwise it is the last day."""
+    qs = ("period1=%d&period2=%d&interval=%s" % (int(p1), int(p2), interval)) if p1 and p2 \
+        else "range=1d&interval=1d"
+    url = "https://%s.finance.yahoo.com/v8/finance/chart/%s?" + qs
     last = None
     for host in ("query1", "query2"):
         for attempt in (0, 1):
@@ -717,6 +764,87 @@ def _coingecko_at(sym, when):
         sym, _num(p), local.strftime("%Y-%m-%d %H:%M"))
 
 
+def _yahoo_hist(sym, days=7):
+    """Daily OHLCV for the last `days` trading days -- the series a chart needs (one request)."""
+    p2 = int(time.time())
+    p1 = p2 - max(10, int(days * 2.2)) * 86400
+    j = _yahoo_raw(sym, p1, p2, "1d")
+    chart = j.get("chart") or {}
+    res = chart.get("result") or []
+    if chart.get("error") or not res:
+        raise RuntimeError((chart.get("error") or {}).get("description") or "no data")
+    r = res[0]
+    m = r.get("meta") or {}
+    off = int(m.get("gmtoffset") or -18000)
+    ts = r.get("timestamp") or []
+    q = ((r.get("indicators") or {}).get("quote") or [{}])[0]
+    rows = []
+    for i, t in enumerate(ts):
+        c = (q.get("close") or [None])[i]
+        if c is None:
+            continue
+        rows.append((datetime.datetime.utcfromtimestamp(t + off).date().isoformat(),
+                     (q.get("open") or [None])[i], (q.get("high") or [None])[i],
+                     (q.get("low") or [None])[i], c, (q.get("volume") or [0])[i] or 0))
+    if not rows:
+        raise RuntimeError("no daily rows in that window")
+    rows = rows[-days:]
+    head = "[yahoo] %s, %d daily rows to %s -- CSV follows (a header row, then the data)" % (
+        m.get("symbol") or sym, len(rows), rows[-1][0])
+    body = "date,open,high,low,close,volume\n" + \
+        "\n".join("%s,%.2f,%.2f,%.2f,%.2f,%d" % row for row in rows)
+    return head + "\n" + body
+
+
+def _nasdaq_hist(sym, days=7):
+    """Same shape from api.nasdaq.com (keyless, US listings); newest first, reversed here."""
+    d0 = datetime.date.today()
+    frm = (d0 - datetime.timedelta(days=max(10, int(days * 2.2)))).strftime("%Y-%m-%d")
+    j = json.loads(_get("https://api.nasdaq.com/api/quote/%s/historical?assetclass=stocks"
+                        "&fromdate=%s&todate=%s&limit=%d"
+                        % (urllib.parse.quote(str(sym)), frm, d0.strftime("%Y-%m-%d"),
+                           max(10, days * 2)),
+                        headers={"Accept": "application/json"}))
+    rows = (((j.get("data") or {}).get("tradesTable") or {}).get("rows")) or []
+    if not rows:
+        raise RuntimeError("no rows (US listings only)")
+    out = []
+    for x in reversed(rows[:days]):
+        try:
+            d = datetime.datetime.strptime(x["date"], "%m/%d/%Y").date().isoformat()
+        except Exception:
+            continue
+        f = lambda k: float(str(x.get(k, "0")).replace("$", "").replace(",", "") or 0)   # noqa: E731
+        out.append("%s,%.2f,%.2f,%.2f,%.2f,%d" % (d, f("open"), f("high"), f("low"), f("close"),
+                                                  int(f("volume"))))
+    return ("[nasdaq] %s, %d daily rows -- CSV follows (a header row, then the data)\n"
+            "date,open,high,low,close,volume\n%s" % (sym, len(out), "\n".join(out)))
+
+
+def stock_history(symbols="", days=7):
+    """The daily open/high/low/close/volume series for the last `days` trading days, as CSV rows --
+    one request per symbol instead of one per day.  Feed it straight into a script or a chart."""
+    syms = [s for s in re.split(r"[,\s]+", str(symbols).upper()) if s][:4]
+    if not syms:
+        return "no symbol given -- try DOCN, AAPL, NVDA"
+    try:
+        days = max(2, min(int(days or 7), 60))
+    except (TypeError, ValueError):
+        days = 7
+    out = []
+    for s in syms:
+        why = []
+        for fn in (_yahoo_hist, _nasdaq_hist):
+            try:
+                out.append(fn(s, days))
+                break
+            except Exception as e:
+                why.append("%s: %s" % (fn.__name__.strip("_").split("_")[0], e))
+        else:
+            out.append("%s: no history (%s)" % (s, "; ".join(why)))
+    return "\n".join(out)
+
+
 def stock_quote(symbols="", detail=False, when=None):
     """Quotes for one or more symbols (AAPL, MSFT, 7203.T, BTC-USD ...).
 
@@ -919,6 +1047,20 @@ def call_tool(name, args, ctx):
                                files=args.get("files"), deps=deps,
                                timeout=int(args.get("timeout") or 30), net=net, root=root,
                                mounts=ctx.get("mounts", ()))
+        if name == "show":
+            sandbox = _load_sandbox()
+            raw = str(args.get("path") or "")
+            p = os.path.realpath(os.path.join(sandbox.WORK, os.path.basename(raw)))
+            if not p.startswith(os.path.realpath(sandbox.WORK)):
+                return "refused: only files inside %s can be opened" % sandbox.WORK
+            if not os.path.isfile(p):
+                return "no such file: %s (files the run made are listed with each python call)" % p
+            why = _refused("open %s on the Mac" % os.path.basename(p), auto_yes)
+            if why:
+                return why
+            subprocess.run(["open", p], check=False)
+            return "opened %s on the Mac (%d bytes) -- path: %s" % (
+                os.path.basename(p), os.path.getsize(p), p)
         if name == "remember":
             return remember(args.get("text", ""))
         if name == "recall":
@@ -931,6 +1073,8 @@ def call_tool(name, args, ctx):
         if name == "stock_quote":
             return stock_quote(args.get("symbols", ""), bool(args.get("detail")),
                                args.get("when"))
+        if name == "stock_history":
+            return stock_history(args.get("symbols", ""), args.get("days") or 7)
         if name == "fx_rate":
             return fx_rate(args.get("base", "USD"), args.get("to", ""))
         p = _under(root, args.get("path"))
@@ -1018,7 +1162,7 @@ def stream(base, model, messages, tools=None, temp=None):
 
 
 def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None,
-        pin="", auto=True, temp=None, examples=True, mounts=()):
+        pin="", auto=True, temp=None, examples=True, mounts=(), initial_skills=()):
     """Interactive chat.
 
     tools: turn the tool harness on.  pin: "all" or a comma list of bundles/tool names to load up
@@ -1033,7 +1177,8 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
     pins = set()
     for w in str(pin or "").split(","):
         pins |= resolve(w)
-    state = {"pinned": sorted(pins), "auto": bool(auto), "mounts": list(mounts)}
+    state = {"pinned": sorted(pins), "auto": bool(auto), "mounts": list(mounts),
+             "skills": set(initial_skills)}
     sys_prompt = system or (SYSTEM_BASE + (SYSTEM_TOOLS if harness else ""))
     prefix = ([{"role": "system", "content": sys_prompt}] if sys_prompt else []) + \
              (list(FORMAT_SHOT) if examples else [])
@@ -1045,6 +1190,10 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
                "mounts": tuple(state.get("mounts", ()))}
         for _ in range(MAX_ITER):
             names = active_names(state, text) if harness else set()
+            # attach the usage notes that belong to the bundles in play, and only those
+            for b in {bundle_of(n) for n in names}:
+                state["skills"] |= set(BUNDLE_SKILLS.get(b, ()))
+            _apply_skills(messages, state)
             reply, calls = stream(base, model, messages, tools=tool_defs(names) if harness else None,
                                   temp=temperature)
             if not calls:
@@ -1165,6 +1314,25 @@ def run(base, model, prompt=None, system=None, tools=False, yes=False, root=None
             cur = state.get("mounts", [])
             print("\n".join("  %s -> /mnt/%s%s" % (h, t, ", read-only" if ro else ", read-write")
                             for h, t, ro in cur) or "  (no host folders shared)")
+            continue
+        if cmd == "/skill" or cmd.startswith("/skill "):
+            arg = cmd[6:].strip().lower()
+            if arg in ("none", "off", "clear"):
+                state["skills"] = set(); print("(notes cleared)"); continue
+            if arg:
+                if arg not in SKILLS:
+                    print("(no note called %s -- have: %s)" % (arg, ", ".join(sorted(SKILLS))))
+                elif arg in state["skills"]:
+                    state["skills"] = set(state["skills"]) - {arg}
+                    print("(note %s detached)" % arg)
+                else:
+                    state["skills"] = set(state["skills"]) | {arg}
+                    print("(note %s attached, %d words)" % (arg, len(SKILLS[arg].split())))
+                continue
+            print("attached: %s" % (", ".join(sorted(state["skills"])) or "none"))
+            for n in sorted(SKILLS):
+                print("  %-8s %s" % (n, SKILLS[n][:78] + ("..." if len(SKILLS[n]) > 78 else "")))
+            print("  (a bundle attaches its own notes when it loads; /skill none clears them)")
             continue
         if cmd == "/auto":
             state["auto"] = not state["auto"]
