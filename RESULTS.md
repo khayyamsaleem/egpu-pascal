@@ -722,3 +722,116 @@ VBIOS's PMU app with envydis -- not a session step, and the power-cycle risk of 
 request is unchanged. Nothing is left modified: `smclk.py --diff` reports 0 registers differing from the
 pre-sweep snapshot, and the card serves again at 1080 MHz memory / 607 MHz SM.
 
+
+## 16. Session 16: a false benchmark number, MAX int8, vision, Hermes, and disconnect safety (2026-11-13)
+
+### The "67 s / 42.8 tok/s with speculation" number was a degenerate loop
+
+Section 0 of the handoff carried two results for the same arguments (`-bs --spec-type ngram-mod`):
+153 s in session 12 and 67 s in session 15. The 67 s run
+(`logs/bench/20261113-102439-gemma4-e4b.json`) is not a speedup: from turn 2 on, the reply is the
+string "```" repeated until the 200-token budget ran out, which n-gram speculation predicts perfectly,
+hence 47-69 tok/s. 11 turns, tool call not made. A fresh run with the same flags
+(`logs/bench/20261113-114337-gemma4-e4b-s16-spec-on-repro.*`) gives **160 s, 13.4 tok/s decode, 377
+tok/s prefill, 12 turns, tool call ok** -- the same as speculation off (162 s). The loop did not
+reproduce; the bad run came four minutes before the 1134 MHz memory experiments were committed, and
+1134 MHz is known to flip bits warm (section 11), but that link is a guess, not a measurement.
+**Speculation buys nothing on this bench. 13.4-13.5 tok/s is the number.**
+
+### Where decode time goes (per kernel)
+
+`NVPASCAL_PROF=1`, `LOCAL_GPU_PLAIN=1`, 300 generated tokens, ~64 ms of GPU time per token (the
+profile's `xcopy` row is the model upload, not decode):
+
+| share of decode GPU time | kernel | per token |
+|---|---|---|
+| 31% | Q4_0 fused gate+up matvec | 42 x 471 us |
+| 27% | Q4_0 matvec | 216 x 80 us |
+| 13% | Q6_K output head | 1 x 8.07 ms |
+| 6% | `quantize_q8_1` | 304 x 13 us |
+| ~20% | ~700 small kernels (rms_norm, broadcast mul, flash-attn tiles, set_rows, gelu) | 12-20 us each |
+
+So ~70% is weight matvecs and ~27% is fixed-cost small launches. Nothing cheap is hiding in there.
+
+### llama.cpp op suite: closed
+
+`test-backend-ops -b CUDA0`, full run: **20,290 cases OK, 0 failed, exit 0**
+(`logs/s16/test-backend-ops.log.gz`). `SOLVE_TRI` passes and the shim logged no unimplemented-stub hit,
+so session 9's exit-134 abort at 13,380 cases was the missing `cublasStrsmBatched`.
+
+### MAX int8 weights (patch 0004): works, and it is a speed result too
+
+The `no kernel registered for 'w8_linear'` blocker had two causes, both now in patch 0004:
+
+1. `pipelines/lib/graph_specs.py`: a grouped compile (`GraphModule` of several graphs) only passes
+   on the `custom_extensions` declared on each `GraphSpec`; kernel libraries a graph imported while
+   tracing (`Graph._import_kernels`, or the process-wide overlay) are dropped. The patch unions each
+   traced graph's `kernel_libraries_paths` into the compile.
+2. `gemma4/layers/attention.py`: the per-device (sharded) copy of the attention layer took its dtype
+   from `o_proj.weight.dtype`, which is int8 once the weights are quantized, so flash attention was
+   asked for an int8 output against bf16 Q/K/V ("Q, K, V, output should have same dtype").
+
+Gemma 4 E2B, `max generate`, greedy, 96 new tokens, 1080 MHz memory, same prompt, same session
+(`logs/s16/max-e2b-cmp-int8_{0,1}.log`):
+
+| | bf16 | int8 weights (`MAX_GEMMA4_INT8=1`) |
+|---|---|---|
+| decode | 9.8 tok/s | **13.4 tok/s** (1.36x) |
+| prefill | 11.0 tok/s | **37.7 tok/s** (3.4x) |
+| time to first token | 1.81 s | 0.53 s |
+| text | -- | byte-identical to bf16 over all 97 tokens |
+
+The shim log shows the two custom kernels loading (6- and 7-parameter `mojo_pkg_*` functions =
+`w8_gemv` / `w8_gemm`), so this is not a silent bf16 fallback. Note the old "MAX E2B bf16 = 1.9
+tok/s" figure dates from the 405 MHz memory clock; at 1080 MHz bf16 is 9.8.
+
+Not done: Gemma 4 E4B on MAX. The memory planner sized it as bf16 (9.64 GiB > 9.0 available) and
+refused before downloading; patch 0004 now subtracts the MLP weights' int8 saving (planner estimate
+~7.8 GiB; the real figure is ~6 GiB of device weights). The run was stopped on purpose 2.7 GiB into
+the 14.9 GiB download: int8 reads 8 bits per weight where llama.cpp's Q4_0 reads 4.5 for the same
+model at 13.5 tok/s, so it cannot beat that. The planner hunk let the load proceed but has never
+been exercised by a full E4B run.
+
+### Gemma 4 E4B reads images
+
+`local-gpu` now downloads the vision projector (`gemma-4-E4B-it-mmproj.gguf`, 0.95 GB, same repo)
+and serves with `--mmproj` by default (`LOCAL_GPU_NO_VISION=1` leaves it out; it costs ~1 GiB of
+VRAM). Test: two generated 640x480 PNGs with random text, plus a no-image control, same question:
+
+| image | truth | answer |
+|---|---|---|
+| a | one red circle, "KESTREL 7391" | "KESTREL 7391", one circle, red |
+| b | two blue squares, "OTTER 2058" | "OTTER 2058", 2 squares, blue |
+| none | -- | "Please provide the image you are referring to." |
+
+132 prompt tokens per image, 5-7 s per answer. The model is text-out only.
+
+### Hermes Agent
+
+Hermes rejects any model whose context is under 64,000 tokens, so `gemma4-e4b` now defaults to a
+65,536-token context (2.9 GiB of VRAM still free with the projector loaded). With the provider
+block from the README in `~/.hermes/config.yaml`, `hermes chat -m local` answers and makes tool
+calls on the card (`echo pascal-$((6*7))` through the terminal tool -> "pascal-42"), and
+`local-gpu / gemma4-e4b` appears in the model-picker payload the CLI, TUI and desktop app share
+(`hermes_cli.inventory.build_models_payload`). Hermes' system prompt and tool definitions are
+~13.9K tokens: the first turn of a cold server spends ~35 s on prefill, later turns reuse the cache.
+
+### Start only with the card attached, stop when it goes
+
+* `pascal/sleepguard.py: egpu_present()` asks the IO registry for an NVIDIA PCI device (~20 ms, no
+  MMIO). `local-gpu serve` checks it before Docker, the containers or any download and exits 1 with
+  "the eGPU is not connected ... Nothing was started."
+* `SleepGuard` polls it every second in every card-holding process; once the card is gone, the next
+  `check()` raises before the access, the same path a sleep takes (shimd exits without touching
+  the card).
+* `local-gpu watch` (spawned by `serve`) stops llama-server / max serve and the proxy and SIGKILLs
+  shimd when the card leaves the registry, then exits.
+* `local-gpu serve` starts Docker (OrbStack) itself if the daemon is down, e.g. after a reboot.
+
+Tested with `PASCAL_SIMULATE_DISCONNECT_FILE` (the card reports absent while that file exists): the
+gate refused to start and launched nothing; a simulated unplug while serving took everything down
+within 10 s; `serve` afterwards was back in 26 s. **Not tested with a real unplug** -- an access
+already in flight when the cable is pulled is outside what a one-second poll can prevent.
+
+Spin-up, measured: 41 s from "Docker quit, driver stopped, card warm" to a healthy endpoint; the
+model load is 31 s of that. A cold card adds the devinit + fb + reclock + gr path.

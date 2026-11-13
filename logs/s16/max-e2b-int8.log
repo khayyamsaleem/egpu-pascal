@@ -1,0 +1,58 @@
+17:29:18.373 INFO: Metrics initialized.
+17:29:18.373 INFO: Tracing off; set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT to export spans.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+17:29:23.252 INFO: set VIDEO_TOTAL_PIXELS: 90316800
+17:29:23.641 INFO: Defaulting structured output backend to the global default 'xgrammar' (architecture Gemma4ForConditionalGeneration declares no default). Override with --structured-output-backend.
+17:29:23.641 INFO: Automatically enabling overlap scheduling for Gemma4ForConditionalGeneration. You can manually disable this by setting --no-enable-overlap-scheduler.
+17:29:23.642 WARNING: Reduced the preprocessed-media cache from 20.00 GiB to 1.95 GiB (1000.52 MiB images, 1000.52 MiB video): the configured ceiling exceeded 25% of the 7.82 GiB this process may use.
+17:29:23.642 INFO: Defaulting reasoning parser to 'gemma4' for architecture Gemma4ForConditionalGeneration. Override with --reasoning-parser, or pass --reasoning-parser=none to disable.
+17:29:23.642 INFO: Defaulting tool parser to 'gemma4' for architecture Gemma4ForConditionalGeneration. Override with --tool-parser, or pass --tool-parser=none to disable.
+17:29:23.643 INFO: devices: gpu[0]
+17:29:23.699 INFO: Vision encoder cache: 226 blocks x 128 tokens sharded across 1 device(s), 84.75 MiB reserved (84.75 MiB per device).
+17:29:23.700 INFO: cache_memory: 15.75 MiB
+17:29:26.027 INFO: All weight files for google/gemma-4-E2B-it found in local HF cache.
+17:29:27.800 INFO: Ignored 752 checkpoint weights matching '^model\\.(embed_audio|audio_tower|vision_embedder)\\.': the unified checkpoints' audio and patch embedders and the E2B/E4B audio tower, which MAX does not implement
+17:29:27.807 INFO: Building, compiling, and initializing model...
+17:29:41.291 INFO: Building model graph took 13.5 seconds
+17:30:27.812 INFO: Still compiling model (46.5s elapsed)
+17:31:27.174 INFO: Compiling model took 93.4 seconds
+17:31:27.175 INFO: Initializing model took 7.6 seconds
+17:31:27.175 INFO: Building, compiling, and initializing model took 119.4 seconds
+17:31:27.195 INFO: Using Jenga KV cache. To fall back to using the legacy KV cache, set MODULAR_USE_LEGACY_KV_CACHE=1
+17:31:27.197 INFO: Jenga KV manager: 4 huge pages x 3.50 MiB = 14.00 MiB (per device), page_size 128 tokens
+17:31:27.198 INFO: 	sliding_attention.sliding_window_group(512): 4 pages of 3.50 MiB  (1 per huge page)
+17:31:27.198 INFO: 	full_attention.full_group                  : 8 pages of 1.75 MiB  (2 per huge page)
+17:31:27.198 WARNING: Jenga KV geometry can strand 66.7% of the per-device KV budget: 2 leaves plus the null block each own whole 3.50 MiB huge blocks, out of 15.75 MiB. Setting a stride alignment on the leaf that inflates the huge block lets the planner pad it.
+17:31:27.207 INFO: Building, compiling, and initializing sampler...
+17:31:27.213 INFO: Building sampler graph took 0.0 seconds
+17:31:45.558 INFO: Compiling sampler took 16.0 seconds
+17:31:45.558 INFO: Initializing sampler took 0.0 seconds
+17:31:45.558 INFO: Building, compiling, and initializing sampler took 18.4 seconds
+17:31:45.559 INFO: Building, compiling, and initializing realize_future_token...
+17:31:46.652 INFO: Building realize_future_token graph took 1.1 seconds
+17:31:53.335 INFO: Compiling realize_future_token took 6.7 seconds
+17:31:53.335 INFO: Initializing realize_future_token took 0.0 seconds
+17:31:53.335 INFO: Building, compiling, and initializing realize_future_token took 7.8 seconds
+17:31:53.338 INFO: 
+17:31:53.339 INFO: ============================================================
+17:31:53.339 INFO: Pipeline Configuration (use --pretty-print-config to print full config)
+17:31:53.339 INFO: ============================================================
+17:31:53.339 INFO:     architecture         : Gemma4ForConditionalGeneration
+17:31:53.339 INFO:     pipeline             : OverlapTextGenerationPipeline
+17:31:53.339 INFO:     model                : google/gemma-4-E2B-it
+17:31:53.339 INFO:     max_seq_len          : 256
+17:31:53.339 INFO:     device_graph_capture : False
+17:31:53.339 INFO: 
+17:31:53.339 INFO: max_batch_size: 1
+17:31:53.348 INFO: Beginning text generation
+The capital of France is **Paris**.
+Prompt size: 14
+Output size: 10
+Startup time: 24.395227432250977 ms
+Time to first token: 438.21144104003906 ms
+Prompt eval throughput (context-encoding): 31.94804765200284 tokens per second
+Time per Output Token: 83.22434955173068 ms
+Eval throughput (token-generation): 12.015714215686586 tokens per second
+Total Latency: 1187.2305870056152 ms
+Total Throughput: 0.8422963583865872 req/s
+exit 0

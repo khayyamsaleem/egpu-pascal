@@ -173,3 +173,52 @@ index 03523a0b98..0e4c556359 100644
          for k, v in state_dict.items():
              if k.endswith("layers.0.input_layernorm.weight"):
                  self.unquantized_dtype = v.dtype
+diff --git a/max/python/max/pipelines/architectures/gemma4/layers/attention.py b/max/python/max/pipelines/architectures/gemma4/layers/attention.py
+index 990f2fe2b1..b15f7fa799 100644
+--- a/max/python/max/pipelines/architectures/gemma4/layers/attention.py
++++ b/max/python/max/pipelines/architectures/gemma4/layers/attention.py
+@@ -408,7 +408,7 @@ class Gemma4Attention(Module, Shardable):
+                 layer_idx=self.layer_idx,
+                 layer_idx_in_cache=self.layer_idx_in_cache,
+                 is_sliding=self.use_local,
+-                dtype=self.o_proj.weight.dtype,
++                dtype=self.dtype,  # maxpatch: the weight dtype is int8 under W8 quantization
+                 devices=[device],
+                 linear_cls=self.o_proj.__class__,
+                 has_bias=self.has_bias,
+diff --git a/max/python/max/pipelines/lib/graph_specs.py b/max/python/max/pipelines/lib/graph_specs.py
+index 90b436e4a1..a9cdc2b4af 100644
+--- a/max/python/max/pipelines/lib/graph_specs.py
++++ b/max/python/max/pipelines/lib/graph_specs.py
+@@ -268,6 +268,12 @@ def compile_and_init_graphs(
+                 for role in members
+                 for path in specs[role].custom_extensions
+             ]
++            # maxpatch: kernels a graph imported while tracing (Graph._import_kernels, or the
++            # process-wide overlay) live on that graph, and a module of graphs drops them.
++            for graph in graphs.values():
++                for path in graph.kernel_libraries_paths:
++                    if path not in extensions:
++                        extensions.append(path)
+         output_trees = {
+             role: graph.output_tree for role, graph in graphs.items()
+         }
+--- a/max/python/max/pipelines/architectures/gemma4/memory_planner.py
++++ b/max/python/max/pipelines/architectures/gemma4/memory_planner.py
+@@ -60,6 +60,16 @@
+                 * per_layer
+                 * dtype_bytes
+             )
++        if os.environ.get("MAX_GEMMA4_INT8", "0") == "1":
++            # maxpatch: the MLP projections load as int8 (1 byte per weight instead of
++            # bf16's 2). The attention projections do too; leaving them out keeps this
++            # estimate on the high side.
++            size -= (
++                3
++                * text.hidden_size
++                * text.intermediate_size
++                * text.num_hidden_layers
++            )
+         return max(size, 0)
+ 
+     def estimate_activation_memory(

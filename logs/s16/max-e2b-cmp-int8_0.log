@@ -1,0 +1,57 @@
+17:33:22.592 INFO: Metrics initialized.
+17:33:22.592 INFO: Tracing off; set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT to export spans.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+17:33:26.921 INFO: set VIDEO_TOTAL_PIXELS: 90316800
+17:33:27.314 INFO: Defaulting structured output backend to the global default 'xgrammar' (architecture Gemma4ForConditionalGeneration declares no default). Override with --structured-output-backend.
+17:33:27.314 INFO: Automatically enabling overlap scheduling for Gemma4ForConditionalGeneration. You can manually disable this by setting --no-enable-overlap-scheduler.
+17:33:27.315 WARNING: Reduced the preprocessed-media cache from 20.00 GiB to 1.95 GiB (1000.52 MiB images, 1000.52 MiB video): the configured ceiling exceeded 25% of the 7.82 GiB this process may use.
+17:33:27.315 INFO: Defaulting reasoning parser to 'gemma4' for architecture Gemma4ForConditionalGeneration. Override with --reasoning-parser, or pass --reasoning-parser=none to disable.
+17:33:27.315 INFO: Defaulting tool parser to 'gemma4' for architecture Gemma4ForConditionalGeneration. Override with --tool-parser, or pass --tool-parser=none to disable.
+17:33:27.315 INFO: devices: gpu[0]
+17:33:33.059 INFO: Vision encoder cache: 226 blocks x 128 tokens sharded across 1 device(s), 84.75 MiB reserved (84.75 MiB per device).
+17:33:33.060 INFO: cache_memory: 15.75 MiB
+17:33:35.166 INFO: All weight files for google/gemma-4-E2B-it found in local HF cache.
+17:33:36.699 INFO: Ignored 752 checkpoint weights matching '^model\\.(embed_audio|audio_tower|vision_embedder)\\.': the unified checkpoints' audio and patch embedders and the E2B/E4B audio tower, which MAX does not implement
+17:33:36.706 INFO: Building, compiling, and initializing model...
+17:33:36.772 INFO: Building model graph took 0.1 seconds
+17:33:52.701 INFO: Compiling model took 0.1 seconds
+17:33:52.702 INFO: Initializing model took 14.0 seconds
+17:33:52.702 INFO: Building, compiling, and initializing model took 16.0 seconds
+17:33:52.711 INFO: Using Jenga KV cache. To fall back to using the legacy KV cache, set MODULAR_USE_LEGACY_KV_CACHE=1
+17:33:52.712 INFO: Jenga KV manager: 4 huge pages x 3.50 MiB = 14.00 MiB (per device), page_size 128 tokens
+17:33:52.712 INFO: 	sliding_attention.sliding_window_group(512): 4 pages of 3.50 MiB  (1 per huge page)
+17:33:52.712 INFO: 	full_attention.full_group                  : 8 pages of 1.75 MiB  (2 per huge page)
+17:33:52.712 WARNING: Jenga KV geometry can strand 66.7% of the per-device KV budget: 2 leaves plus the null block each own whole 3.50 MiB huge blocks, out of 15.75 MiB. Setting a stride alignment on the leaf that inflates the huge block lets the planner pad it.
+17:33:52.715 INFO: Building, compiling, and initializing sampler...
+17:33:52.718 INFO: Building sampler graph took 0.0 seconds
+17:33:54.365 INFO: Compiling sampler took 0.3 seconds
+17:33:54.365 INFO: Initializing sampler took 0.0 seconds
+17:33:54.365 INFO: Building, compiling, and initializing sampler took 1.6 seconds
+17:33:54.365 INFO: Building, compiling, and initializing realize_future_token...
+17:33:54.969 INFO: Building realize_future_token graph took 0.6 seconds
+17:33:55.125 INFO: Compiling realize_future_token took 0.2 seconds
+17:33:55.125 INFO: Initializing realize_future_token took 0.0 seconds
+17:33:55.125 INFO: Building, compiling, and initializing realize_future_token took 0.8 seconds
+17:33:55.125 INFO: 
+17:33:55.126 INFO: ============================================================
+17:33:55.126 INFO: Pipeline Configuration (use --pretty-print-config to print full config)
+17:33:55.126 INFO: ============================================================
+17:33:55.126 INFO:     architecture         : Gemma4ForConditionalGeneration
+17:33:55.126 INFO:     pipeline             : OverlapTextGenerationPipeline
+17:33:55.126 INFO:     model                : google/gemma-4-E2B-it
+17:33:55.126 INFO:     max_seq_len          : 256
+17:33:55.126 INFO:     device_graph_capture : False
+17:33:55.126 INFO: 
+17:33:55.129 INFO: max_batch_size: 1
+17:33:55.131 INFO: Beginning text generation
+A hash table handles collisions, which occur when two different keys map to the same index in the underlying array, primarily through a technique called **collision resolution**. The most common method is **separate chaining**, where each slot in the hash table array holds a pointer to a linked list. When a collision occurs, the new key-value pair is simply added to the linked list at that index, allowing the table to store multiple items at the same location. Alternatively, **open addressing**
+Prompt size: 20
+Output size: 97
+Startup time: 2.870798110961914 ms
+Time to first token: 1814.1210079193115 ms
+Prompt eval throughput (context-encoding): 11.024622895987962 tokens per second
+Time per Output Token: 101.55540456374486 ms
+Eval throughput (token-generation): 9.846841773667638 tokens per second
+Total Latency: 11563.439846038818 ms
+Total Throughput: 0.08647945709187572 req/s
+exit 0

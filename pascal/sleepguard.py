@@ -11,6 +11,10 @@ hit a device that was no longer there.  On Apple Silicon that bus error is fatal
   * SleepGuard     records kern.waketime at start; check() costs two sysctls (~3 us, at most every 50 ms of wall time) and raises
                    SystemSlept, before any access, once the Mac has slept since.  After a sleep
                    the card is cold anyway: re-run devinit.py + fb.py + reset_engines.py + gr.py.
+  * egpu_present() asks the IO registry (no MMIO, ~20 ms) whether an NVIDIA PCI device is attached.
+                   SleepGuard polls it once a second from a daemon thread, and check() raises
+                   SystemSlept as soon as the card is gone: an unplugged or powered-off enclosure is
+                   the same hazard as a sleep, the next access hits a device that is not there.
 """
 import ctypes, ctypes.util, os, subprocess, sys
 
@@ -28,6 +32,23 @@ def _sysctl_timeval(name: bytes):
     return (tv.tv_sec, tv.tv_usec)
 
 
+def egpu_present() -> bool:
+    """True while an NVIDIA PCI device is in the IO registry. Never touches the card. On anything
+    but macOS, or if ioreg itself cannot be run, the answer is True: this is a tripwire for a card
+    that has gone, not a gate that an unrelated failure should close."""
+    if sys.platform != "darwin":
+        return True
+    fake = os.environ.get("PASCAL_SIMULATE_DISCONNECT_FILE")     # test hook: absent while this file exists
+    if fake and os.path.exists(fake):
+        return False
+    try:
+        out = subprocess.run(["ioreg", "-r", "-c", "IOPCIDevice", "-d", "1", "-w0"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return "pci10de," in out
+
+
 class SystemSlept(BaseException):
     """Raised instead of touching the card after a sleep/wake (BaseException: not swallowed
     by the `except Exception` handlers around individual RPC ops)."""
@@ -38,6 +59,19 @@ class SleepGuard:
         self.enabled = sys.platform == "darwin"
         self.wake0 = _sysctl_timeval(b"kern.waketime") if self.enabled else None
         self.sleep0 = _sysctl_timeval(b"kern.sleeptime") if self.enabled else None
+        self.gone = False
+        if self.enabled and os.environ.get("PASCAL_NO_PRESENCE_WATCH") != "1":
+            import threading
+            threading.Thread(target=self._watch_presence, daemon=True).start()
+
+    PRESENCE_INTERVAL = 1.0
+
+    def _watch_presence(self):
+        import time
+        while not self.gone:
+            time.sleep(self.PRESENCE_INTERVAL)
+            if not egpu_present() and not egpu_present():     # two misses in a row, not one odd read
+                self.gone = True
 
     def slept(self) -> bool:
         if not self.enabled:
@@ -50,6 +84,9 @@ class SleepGuard:
 
     def check(self):
         import time
+        if self.gone:
+            raise SystemSlept("the eGPU is no longer attached (unplugged or powered off), so no "
+                              "further MMIO (reconnect it, then re-init the card)")
         now = time.time()
         if 0 <= now - self._last < self.INTERVAL:
             return

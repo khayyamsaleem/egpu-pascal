@@ -1,9 +1,11 @@
 HANDOFF — GTX 1080 Ti (GP102) bring-up over TinyGPU on a MacBook Air M1
 
-Written at the end of session 15 (2026-11-13) for whoever picks this up next — human or model.  Every
+Written at the end of session 15 (2026-11-13) and amended by session 16 the same day (the block
+"WHAT SESSION 16 SETTLED" below, tasks B and C, and the handover state) for whoever picks this up
+next — human or model.  Every
 claim here is measured on this card unless it says otherwise: the project's standing rule is that a
 claim is a round trip with a negative control, and that the raw value the judgement came from gets
-printed.  RESULTS.md is the full evidence trail, section by section (it now runs to section 15); the
+printed.  RESULTS.md is the full evidence trail, section by section (it now runs to section 16); the
 per-session handoffs in docs/handoffs/ are history.  Sections 1, 5 and 6 (environment, gotchas, file
 map) are the parts that stay true across sessions — read them before running anything.
 
@@ -18,8 +20,30 @@ Today's numbers:
 
   Gemma 4 E4B QAT Q4_0 on llama.cpp, 12-turn bench, memory 1080 MHz (measured 537 f_CK), SM 607 MHz:
     162 s / 13.5 tok/s decode / 354 tok/s prefill    n-gram speculation OFF (the comparable shape)
-     67 s / 42.8 tok/s overall                       speculation ON (what `serve` does by default)
+    160 s / 13.4 tok/s decode / 377 tok/s prefill    speculation ON (what `serve` does by default)
+  (An earlier "67 s / 42.8 tok/s" for speculation ON was a degenerate output loop, not a speedup:
+  RESULTS.md section 16.)
   Memory read bandwidth 87.4 GB/s (was 31.1 at the 405 MHz boot clock).
+
+WHAT SESSION 16 SETTLED (RESULTS.md section 16):
+
+  * The 67 s benchmark was garbage output ("```" repeated); speculation is worth nothing on the bench.
+  * Per-kernel decode profile: ~70% weight matvecs, ~27% small fixed-cost launches. No cheap lever.
+  * llama.cpp op suite passes in full: 20,290 OK, 0 failed (task C closed).
+  * MAX int8 (patch 0004) WORKS on Gemma 4 E2B: 13.4 tok/s decode vs 9.8 bf16, prefill 37.7 vs 11.0,
+    text byte-identical. Two fixes: grouped compiles drop traced kernel libraries
+    (pipelines/lib/graph_specs.py), and sharded attention took the int8 weight dtype as its output
+    dtype (gemma4/layers/attention.py). E4B on MAX was deliberately NOT run: 8-bit weights cannot
+    beat llama.cpp's Q4_0 on the same model. The user's bar: do not try a model or path that
+    cannot beat ~13 tok/s.
+  * gemma4-e4b serves with its vision projector by default and reads images (verified with a
+    negative control). Text-out only.
+  * gemma4-e4b defaults to a 65,536 context because Hermes Agent refuses anything under 64,000;
+    `hermes chat -m local` works, tool calls included (provider block: README "Images, Hermes, and
+    unplugging"; it lives in ~/.hermes/config.yaml, outside this repo).
+  * `local-gpu serve` refuses to start without the eGPU in the IO registry, starts Docker itself,
+    and leaves a watcher that stops everything if the card disconnects. Tested by simulation
+    (PASCAL_SIMULATE_DISCONNECT_FILE), NOT with a real unplug.
 
 WHAT SESSION 15 SETTLED — three levers, each closed by measurement so nobody re-opens them on
 intuition:
@@ -120,6 +144,7 @@ Server command lines actually used (flags are load-bearing):
   llama-server -m /models/<file> --alias <name> -ngl 99 -fa on -c <ctx> -np 1 -cram 2048 --jinja
                --host 0.0.0.0 --port 8080 -bs --spec-type ngram-mod
                -ot per_layer_token_embd.weight=CUDA0,token_embd.weight=CUDA0
+               --mmproj /models/gemma-4-E4B-it-mmproj.gguf      (gemma4-e4b; ctx now 65536)
   max serve --model <hf-id> --served-model-name <alias> --quantization-encoding <enc> --devices gpu
             --no-device-graph-capture --max-length <ctx> --max-batch-size 1 --host 0.0.0.0 --port 8000
             [--no-prefer-module-v3]        (E-series env: MAX_GEMMA4_ACTIVATION_MIB=1024)
@@ -149,9 +174,8 @@ Performance history, for orientation (all greedy, batch 1):
     fp32 6.6 tok/s, Gemma 4 E2B bf16 1.9 tok/s.
   1080 MHz memory (since session 11): E4B 159 s / 13.4-13.5 tok/s, byte-identical output to the
     405 MHz run.
-  Caveat worth reconciling: the bench's speculation-ON number is recorded twice with very different
-    results — 153 s in the session-12 notes, 67 s measured in session 15 (11 turns, tool call not
-    made).  Neither is explained; state which argument set a number came from before quoting it.
+  Reconciled in session 16: the 67 s speculation-ON run was a degenerate output loop.  The real
+    speculation-ON figure is 153-160 s, i.e. no gain over 159-162 s with it off.
 
 =====================================================================
 3. INSTRUMENTS (sessions 13-15 — use these, do not rebuild them)
@@ -199,7 +223,11 @@ A. **PMU clock control** — the only remaining performance avenue (RESULTS.md s
    register), then bench_chat.py with LOCAL_GPU_PLAIN=1 on BOTH sides (4% is this card's noise floor).
    Anything else is not evidence.
 
-B. **Finish MAX patch 0004 (int8 W8A16 weights).**  The `w8_linear` custom op (maxpatch/kernels/w8)
+B. **MAX patch 0004 (int8 W8A16 weights) — DONE for E2B in session 16** (RESULTS.md section 16:
+   1.36x decode, 3.4x prefill, identical text).  What is left is optional: E4B on MAX needs a
+   14.9 GiB download and will land near half of llama.cpp's speed, and the planner hunk that lets
+   it load has not been through a full run.  The original task text follows for the history.
+   The `w8_linear` custom op (maxpatch/kernels/w8)
    is written and benchmarked standalone (1.2-2.8x decode, 5.5-11x prefill over MAX's bf16
    ops.matmul), and MAX_GEMMA4_INT8=1 makes the gemma4 config declare INT8_W8A8 with load-time RTN
    quantization — but a full model compile still fails with `error: 'mo.custom' op MOToMAP: no kernel
@@ -210,7 +238,8 @@ B. **Finish MAX patch 0004 (int8 W8A16 weights).**  The `w8_linear` custom op (m
    device weights, over the card's ~8.8 GiB pool) run on MAX at all.  Honest expectation: int8 weights
    read 2x the bytes of llama.cpp's Q4_0, so this is a coverage task, not a tok/s one.
 
-C. **Re-run the llama.cpp op suite** after commit c4f50f5 (added cublasStrsmBatched for ggml's
+C. **DONE in session 16: the llama.cpp op suite passes** (20,290 OK, 0 failed, exit 0).  Original
+   task: re-run it after commit c4f50f5 (added cublasStrsmBatched for ggml's
    SOLVE_TRI).  Session 9's run passed 13,380 cases then aborted with exit 134 (the shim's generated
    stubs log and abort on an unimplemented entry point); the rebuild is verified, the re-run is not.
    `test-backend-ops -o MUL_MAT` is the quick pass; a failure names the missing entry point.
@@ -298,6 +327,9 @@ F. **Left unclaimed on purpose:** the v01_07 QMD layout as a serialization encod
 =====================================================================
 7. HANDOVER STATE
 =====================================================================
+Session 16 left the card warm, serving gemma4-e4b on llama.cpp with vision (context 65536, 2.9 GiB
+of VRAM free), 1080 MHz memory / 607 MHz SM, endpoint 127.0.0.1:11434 up, shimd and `local-gpu
+watch` running; maxnightly and maxlab stopped.  The session-15 state, for the record:
 Card: warm, serving gemma4-e4b on llama.cpp (context 16384), 1080 MHz memory / 607 MHz SM, endpoint
 127.0.0.1:11434 up, shimd running.  Nothing is left modified from any experiment: `pascal/smclk.py
 --diff /tmp/sweep2-before.json` reported 0 registers differing from the pre-sweep snapshot.

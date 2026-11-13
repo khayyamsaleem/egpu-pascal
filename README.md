@@ -171,6 +171,40 @@ open/high/low/close/volume rows for the last N trading days, returned as CSV
 (`date,open,high,low,close,volume`) in **one** request per symbol, which is what a chart or a trend
 question wants -- seven `stock_quote` calls would be seven round trips for the same numbers.
 
+## Images, Hermes, and unplugging
+
+**Images.** `gemma4-e4b` is served with its vision projector, so the OpenAI endpoint takes
+`image_url` content parts (132 prompt tokens per image). `LOCAL_GPU_NO_VISION=1` serves text-only
+and frees ~1 GiB of VRAM. The model reads images; it does not produce them.
+
+**Hermes Agent** (CLI, TUI and the desktop app share one config). Add to `~/.hermes/config.yaml`:
+
+```yaml
+providers:
+  local-gpu:
+    api: http://127.0.0.1:11434/v1
+    api_key: local-gpu
+    discover_models: false
+    models:
+      gemma4-e4b:
+        context_length: 65536
+model_aliases:
+  local:
+    model: gemma4-e4b
+    provider: local-gpu
+```
+
+Then `local-gpu serve` and `hermes chat -m local`, `/model local` in a running session, or pick
+**local-gpu / gemma4-e4b** in the model picker. Hermes needs a 64K context, which is why 65,536 is
+the default for this model. Its ~14K-token system prompt costs ~35 s of prefill on the first turn
+after a server start; later turns reuse the cache.
+
+**The card has to be there.** `local-gpu serve` refuses to start when no NVIDIA PCI device is in
+the IO registry, and a watcher it leaves running stops the servers and the driver server if the
+enclosure is unplugged or powered off (MMIO to a card that has gone is a kernel panic). After a
+reconnect, `local-gpu serve` again: the card is cold and is re-initialised. Docker is started for
+you if it is not running. From everything-down to a healthy endpoint is about 40 s.
+
 ## Running code: the sandbox
 
 The model can write and run code without the question "may I run this?" having to be "only if I read

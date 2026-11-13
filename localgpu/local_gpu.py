@@ -50,10 +50,12 @@ HF = "https://huggingface.co/%s/resolve/main/%s"
 
 MODELS = {
     "gemma4-e4b": dict(repo="google/gemma-4-E4B-it-qat-q4_0-gguf", file="gemma-4-E4B_q4_0-it.gguf", size=5.15,
-                       family="gemma4", params="8B (E4B)", quant="Q4_0", ctx=16384,
+                       family="gemma4", params="8B (E4B)", quant="Q4_0", ctx=65536,   # 64K: the floor Hermes Agent accepts; fits with 2.9 GiB spare
                        desc="Google Gemma 4 E4B, quantization-aware 4-bit: fast, tools, the default",
                        # its 2.7 GB of per-layer/input embeddings on the card: +10% prompt speed (pp512 764 -> 840)
-                       args="-ot per_layer_token_embd.weight=CUDA0,token_embd.weight=CUDA0"),
+                       args="-ot per_layer_token_embd.weight=CUDA0,token_embd.weight=CUDA0",
+                       # the vision projector (same repo, 0.95 GB file, ~1 GiB of VRAM): image input, 132 tokens/image
+                       mmproj="gemma-4-E4B-it-mmproj.gguf", mmproj_size=0.95),
     "gemma4-12b": dict(repo="google/gemma-4-12B-it-qat-q4_0-gguf", file="gemma-4-12b-it-qat-q4_0.gguf", size=6.98,
                        family="gemma4", params="12B", quant="Q4_0", ctx=8192,
                        desc="Google Gemma 4 12B, QAT 4-bit: strongest that fits 11 GB, slower"),
@@ -220,8 +222,26 @@ def repost():
     card_scripts(("pascal/devinit.py", "firmware/gp102_vbios.rom"), ("pascal/fb.py",))
 
 
+def egpu_present():
+    """Is the card attached? Asked of the IO registry (pascal/sleepguard.py), so it costs ~20 ms and never
+    touches the card -- which matters, because MMIO to an enclosure that has gone is a kernel panic."""
+    sys.path.insert(0, os.path.join(REPO, "pascal"))
+    try:
+        import sleepguard
+    finally:
+        sys.path.pop(0)
+    return sleepguard.egpu_present()
+
+
+def require_egpu():
+    if not egpu_present():
+        die("the eGPU is not connected (no NVIDIA PCI device in the IO registry): plug in and power on the "
+            "enclosure, then run this again. Nothing was started.")
+
+
 def ensure_card(vram_gib, mclk=None):
     mclk = MCLK_DEFAULT if mclk is None else mclk
+    require_egpu()
     if shimd_info():
         return
     if not os.path.exists(VENV_PY):
@@ -260,7 +280,26 @@ def ct_state(ct):
     return None if r.returncode else r.stdout.strip() == "true"
 
 
+def ensure_docker():
+    """After a reboot the Docker daemon (OrbStack here) is not running, and every `docker` call then looks
+    like "no such container". Start it and wait, rather than trying to rebuild an image that exists."""
+    if not sh(["docker", "info"], check=False).returncode:
+        return
+    say("Docker is not running: starting it")
+    for app in ("OrbStack", "Docker"):
+        if not sh(["open", "-ga", app], check=False).returncode:
+            break
+    else:
+        die("Docker is not running and neither OrbStack nor Docker Desktop could be started")
+    for _ in range(90):
+        if not sh(["docker", "info"], check=False).returncode:
+            return
+        time.sleep(1)
+    die("Docker did not come up in 90 s")
+
+
 def ensure_llama_container():
+    ensure_docker()
     st = ct_state(LLAMA_CT)
     if st is None:
         if sh(["docker", "image", "inspect", LLAMA_IMAGE], check=False).returncode:
@@ -283,6 +322,7 @@ def ensure_llama_container():
 
 
 def ensure_max_container():
+    ensure_docker()
     st = ct_state(MAX_CT)
     if st is None:
         die("container %s is missing (see maxpatch/README.md to set up the MAX nightly)" % MAX_CT)
@@ -309,15 +349,17 @@ def resolve(name):
 def ensure_model(name, m):
     if m.get("runtime") == "max":
         return
-    if not dexec(LLAMA_CT, "test -f /models/%s" % m["file"], check=False).returncode:
-        return
-    say("downloading %s (%.1f GB) from huggingface.co/%s -- resumable, safe to Ctrl-C and rerun"
-        % (m["file"], m["size"], m["repo"]))
-    url = HF % (m["repo"], m["file"])
-    r = dexec(LLAMA_CT, "cd /models && curl -fL -C - --retry 50 --retry-all-errors --retry-delay 3 -# -o '%s.part' '%s' "
-              "&& mv '%s.part' '%s'" % (m["file"], url, m["file"], m["file"]), check=False, capture=False)
-    if r.returncode:
-        die("download failed; rerun the same command to resume")
+    files = [(m["file"], m["size"])] + ([(m["mmproj"], m.get("mmproj_size", 1.0))] if m.get("mmproj") else [])
+    for file, size in files:
+        if not dexec(LLAMA_CT, "test -f /models/%s" % file, check=False).returncode:
+            continue
+        say("downloading %s (%.1f GB) from huggingface.co/%s -- resumable, safe to Ctrl-C and rerun"
+            % (file, size, m["repo"]))
+        url = HF % (m["repo"], file)
+        r = dexec(LLAMA_CT, "cd /models && curl -fL -C - --retry 50 --retry-all-errors --retry-delay 3 -# -o '%s.part' '%s' "
+                  "&& mv '%s.part' '%s'" % (file, url, file, file), check=False, capture=False)
+        if r.returncode:
+            die("download failed; rerun the same command to resume")
 
 
 def current():
@@ -327,7 +369,9 @@ def current():
         return None
 
 
-def stop_servers():
+def stop_servers(watch=True):
+    if watch:
+        kill("watch")
     kill("proxy")
     if ct_state(LLAMA_CT):
         dexec(LLAMA_CT, "pkill -f llama-server; for i in $(seq 50); do pgrep -f llama-server >/dev/null || break; sleep 0.2; done",
@@ -348,10 +392,12 @@ LLAMA_FAST = "" if os.environ.get("LOCAL_GPU_PLAIN") == "1" else "-bs --spec-typ
 
 
 def llama_args(a, m):
-    """Extra llama-server flags: LLAMA_FAST, the model's own (MODELS[..]["args"]), then --llama-args /
+    """Extra llama-server flags: LLAMA_FAST, the model's own (MODELS[..]["args"]), its vision projector
+    (MODELS[..]["mmproj"]; LOCAL_GPU_NO_VISION=1 leaves it out and frees ~1 GiB of VRAM), then --llama-args /
     LOCAL_GPU_LLAMA_ARGS (shell text, appended last so it can override)."""
     plain = os.environ.get("LOCAL_GPU_PLAIN") == "1"
-    parts = [LLAMA_FAST, "" if plain else m.get("args", ""), getattr(a, "llama_args", "") or ""]
+    mmproj = "--mmproj /models/%s" % m["mmproj"] if m.get("mmproj") and os.environ.get("LOCAL_GPU_NO_VISION") != "1" else ""
+    parts = [LLAMA_FAST, "" if plain else m.get("args", ""), mmproj, getattr(a, "llama_args", "") or ""]
     return " ".join(x for x in parts if x)
 
 
@@ -365,6 +411,7 @@ def serve(a):
             print_endpoints(name, m, cur)
         return cur
     runtime = m.get("runtime", "llama")
+    require_egpu()                         # before Docker, the containers or a download: no card, no start
     ensure_llama_container() if runtime == "llama" else ensure_max_container()
     ensure_model(name, m)
     ensure_card(a.vram_gib, getattr(a, "mclk", None))
@@ -410,6 +457,7 @@ def serve(a):
         time.sleep(0.1)
     cur = dict(model=name, runtime=runtime, ctx=ctx, backend=backend, started=time.time())
     json.dump(cur, open(state_file("current.json"), "w"))
+    spawn("watch", [sys.executable, os.path.abspath(__file__), "watch"])
     if not a.quiet:
         print_endpoints(name, m, cur)
     return cur
@@ -426,6 +474,11 @@ def print_endpoints(name, m, cur):
 
 # ------------------------------------------------------------------ commands
 def cmd_status(a):
+    if not egpu_present():                                   # and do not ask shimd: that reaches the card
+        print("card     eGPU not connected")
+        print("server   %s" % ("stale state from before the disconnect" if current() else "none"))
+        print("endpoint http://127.0.0.1:%d %s" % (PROXY_PORT, "up" if http_ok("http://127.0.0.1:%d/" % PROXY_PORT) else "down"))
+        return
     info = shimd_info()
     t = shimd_temp() if info else None
     print("card     " + ("up: %.1f of %.1f GiB free, SM %d MHz, memory %d MHz%s" % (
@@ -457,6 +510,28 @@ def cmd_pull(a):
     if m.get("runtime") == "max":
         die("MAX models download on first `serve`")
     ensure_llama_container(); ensure_model(name, m); say("%s ready" % name)
+
+
+def cmd_watch(a):
+    """Started by `serve`, one per running server: stop everything, without touching the card, as soon as
+    the eGPU leaves the IO registry. shimd's own guard (pascal/sleepguard.py) refuses MMIO from the same
+    signal; this is the half that also takes down the servers that would keep asking it."""
+    while True:
+        time.sleep(2)
+        if egpu_present() or egpu_present():                 # asked first: shimd_info() reaches the card
+            if not pid_alive("shimd") and not current():
+                return                                       # stopped by hand: nothing left to watch
+            continue
+        say("%s the eGPU disconnected: stopping the servers and the driver server (no card access)"
+            % time.strftime("%F %T"))
+        pid = pid_alive("shimd")
+        if pid:
+            os.kill(pid, signal.SIGKILL)                     # SIGKILL: no cleanup path, so no MMIO
+        sh(["pkill", "-9", "-f", "pascal/shimd.py"], check=False)
+        stop_servers(watch=False)
+        open(state_file("disconnected"), "w").write(time.strftime("%F %T") + "\n")
+        say("stopped. Reconnect the enclosure and run `local-gpu serve`: the card will be cold.")
+        return
 
 
 def cmd_stop(a):
@@ -564,6 +639,7 @@ def main():
     p.add_argument("what", nargs="*", default=["--status"])
     p = sub.add_parser("pull"); p.add_argument("model")
     p = sub.add_parser("stop"); p.add_argument("--all", action="store_true", help="also stop the driver server")
+    sub.add_parser("watch", help="(started by serve) stop everything if the eGPU disconnects")
     p = sub.add_parser("logs"); p.add_argument("which", nargs="?", default="server", choices=["server", "shimd", "proxy"])
     p.add_argument("-n", type=int, default=60)
     p = common(sub.add_parser("bench", help="llama-bench a model"), model=False)
@@ -578,7 +654,7 @@ def main():
     elif a.cmd == "run":
         cmd_chat(a, prompt=" ".join(a.prompt) or None)
     else:
-        {"status": cmd_status, "models": cmd_models, "pull": cmd_pull, "stop": cmd_stop, "logs": cmd_logs,
+        {"status": cmd_status, "models": cmd_models, "pull": cmd_pull, "stop": cmd_stop, "watch": cmd_watch, "logs": cmd_logs,
          "bench": cmd_bench, "sandbox": cmd_sandbox}[a.cmd](a)
 
 
