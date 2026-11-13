@@ -1,0 +1,8 @@
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/memtest.py", line 46, in main
+    ns = dev.launch(ks["mt_fill"], (a.grid, 1, 1), (256, 1, 1), struct.pack("<QQI", b.va, n4, seed))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/nvpascal.py", line 482, in launch
+    self.wait_seq(self.launch_async(k, grid, block, params, smem=smem, timed=True))
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/nvpascal.py", line 191, in wait_seq
+    raise RuntimeError("launch %d did not complete (done %d): %s"
+RuntimeError: launch 3 did not complete (done 2): GP_GET=4 GP_PUT=4 chan=17000001 FIFO_INTR=10000000

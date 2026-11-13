@@ -1,0 +1,6 @@
+testing 8 x 1024 MiB = 8.00 GiB of VRAM (PA 0x40000000 .. 0x240000000)
+seed 00000000: 0 bad words over 8.00 GiB
+seed ffffffff: 0 bad words over 8.00 GiB
+seed 5a5aa5a5: 0 bad words over 8.00 GiB
+write bandwidth 51.8 GB/s (min 49.5), read bandwidth 64.0 GB/s (min 63.9); 1 s
+RESULT: PASS

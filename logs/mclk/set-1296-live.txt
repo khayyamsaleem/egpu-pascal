@@ -1,0 +1,114 @@
+0x101000 = 0x00400080: strap 0 -> ramcfg index 0 (BIT M xlat @0x4c42)
+target 1296 MHz: rammap band 1 (541..1299), timing 1, bank 1, refpll coef 00012f01, FBPAs [0, 1, 2, 3, 4, 5]; LIVE
+  ramcfg {'timing': 1, 'r01_01': 0, 'r01_02': 0, 'r01_04': 0, 'r01_08': 0, 'r01_10': 0, 'DLLoff': 1, 'r01_40': 1, 'r01_80': 0, 'r02_03': 2, 'r02_04': 1, 'r02_08': 1, 'r02_10': 1, 'r02_40': 0, 'r02_80': 1, 'r03_0f': 0, 'r03_30': 1, 'r03_c0': 1, 'r03_f0': 5, 'r04': 6, 'r06': 0, 'r07_02': 1, 'r07_04': 1, 'r07_08': 0, 'r07_10': 0, 'r07_40': 1, 'r07_80': 0, 'r08_01': 1, 'r08_02': 0, 'r08_04': 1, 'r08_08': 0, 'r08_10': 0, 'r08_20': 0, 'r09': 1}
+  timing WL 5 CL 9 WR 7, words 07162d12 2411c289 aa070411 2200194a d3618032 a6b270a2 0100860b 00c35000 0a023900 00000006 09144444
+  [bank] program bank 1 from the VBIOS mode script
+    wr 9a065c <- 00000012  write bank 1  (was 00000022)
+    script 1: wr 98467c <- fff10000
+    script 1: wr 984708 <- 00030002
+    script 1: wr 9a070c <- 00004d4d
+    script 1: wr 9006a0 <- 12121212
+    script 1: wr 9006a4 <- 12121212
+    script 1: wr 9046a0 <- 12121212
+    script 1: wr 9046a4 <- 12121212
+    script 1: wr 9086a0 <- 12121212
+    script 1: wr 9086a4 <- 12121212
+    script 1: cond [0x30] -> True (override)
+    script 1: wr 90c6a0 <- 12121212
+    script 1: wr 90c6a4 <- 12121212
+    script 1: cond [0x31] -> True (override)
+    script 1: wr 9106a0 <- 12121212
+    script 1: wr 9106a4 <- 12121212
+    script 1: wr 9146a0 <- 12121212
+    script 1: wr 9146a4 <- 12121212
+    script 1: wr 9846a8 <- 0f0f0f0f
+    script 1: wr 9846ac <- 0f0f0f0f
+    wr 9a065c <- 00000022  restore write bank  (was 00000012)
+  [enter] stop refresh, precharge, self-refresh
+    wr 9a0910 <- 240c0000  train pre  (was 250c0000)
+    wr 9a0914 <- 240c0000  train pre  (was 250c0000)
+    wr 9a0210 <- 00002f2f  REFRESH_AUTO = 0  (was 80002f2f)
+    wr 9a0310 <- 00000001  REFRESH
+    wr 9a0200 <- 828f9000    (was 028f9000)
+    wr 9a0314 <- 00000001  PRECHARGE
+    wr 9a0200 <- 028f9000    (was 828f9000)
+    wr 9a0090 <- 00000061  
+    wr 9a0090 <- c000007f  self-refresh enter
+    wr 9a0698 <- 00000000  
+    wr 9a069c <- 00000000  
+  [clock] refpll 00013b01 -> 00012f01
+    wr 1373f4 <- 00010111    (was 00000111)
+    wr 1373f4 <- 00010110  mclk source off  (was 00010111)
+    wr 1373f4 <- 00010100    (was 00010110)
+    wr 132020 <- 20030000  refpll off  (was 20030001)
+    wr 137320 <- 00000000  
+    wr 132024 <- 00012f01  refpll coefficients
+    wr 132028 <- 000c0010    (was 00040010)
+    wr 132020 <- 20010001  refpll on  (was 20010000)
+    wait 137390 & 00020000 == 00020000  refpll lock
+    wr 132028 <- 10040010    (was 100c0010)
+    wr 1373f4 <- 00010110    (was 00010100)
+    wr 1373ec <- 00010000    (was 00030000)
+    wr 1373f4 <- 00010111  mclk source = refpll  (was 00010110)
+    wr 1373f4 <- 00000111    (was 00010111)
+  [config] band 1 settings and timings
+    wr 9a0670 <- b4081306    (was 34081306)
+    wr 9a065c <- 00000011  active bank
+    wr 9a06b8 <- 01010101  
+    wr 9a06bc <- 01010101  
+    wr 9a0698 <- 00000000  
+    wr 9a069c <- 00000000  
+    wr 9a0694 <- 060c060c    (was 000c000c)
+    wr 9a0670 <- 34081306    (was b4081306)
+    wr 9a082c <- 00150000    (was 00050000)
+    wr 9a0830 <- 00271099    (was 00272099)
+    wr 9a0248 <- 09144444  timing[10]  (was 1e144444)
+    wr 9a0290 <- 07162d12  timing[0]  (was 174ca53d)
+    wr 9a0294 <- 2411c289  timing[1]  (was 21468294)
+    wr 9a0298 <- aa070411  timing[2]  (was aa180800)
+    wr 9a029c <- 2200194a  timing[3]  (was 2200314a)
+    wr 9a02a0 <- d3618032  timing[4]  (was d5830032)
+    wr 9a02a8 <- 0100860b  timing[6]  (was 4100860f)
+    wr 9a02cc <- 0a023900  timing[8]  (was 0a063900)
+    wr 9a0808 <- 7aa00050    (was 4aa00050)
+    wr 9a024c <- 0904062b    (was 1e04062b)
+  [exit] self-refresh exit, refresh on
+    wr 9a0090 <- 4000007e  self-refresh exit
+    wr 9a0314 <- 00000001  PRECHARGE
+    wr 9a0310 <- 00000001  REFRESH
+    wr 9a0210 <- 80002f2f  REFRESH_AUTO = 1  (was 00002f2f)
+    wr 9a0338 <- 00300023  MR3  (was 00300003)
+    wr 9a0300 <- 00000325  MR0 WL 5 CL 9 WR 7  (was 0000047d)
+    wr 9a0330 <- 00100030  MR1  (was 00100024)
+    wr 9a0354 <- 00800400  MR8  (was 00800402)
+    wr 9a0200 <- 828f9000    (was 028f9000)
+    wr 9a0318 <- 00000001  NOP
+    wr 9a0200 <- 028f9000    (was 828f9000)
+  [train]
+    wr 9a0910 <- 980a0000  train  (was 240c0000)
+    wr 9a0914 <- 980a0000  train  (was 240c0000)
+    wait 900974 & 0000000d == 00000000  FBPA0 training done (half partition: bit 1 ignored)
+    wait 904974 & 0000000f == 00000000  FBPA1 training done
+    wait 908974 & 0000000f == 00000000  FBPA2 training done
+    wait 90c974 & 0000000f == 00000000  FBPA3 training done
+    wait 910974 & 0000000f == 00000000  FBPA4 training done
+    wait 914974 & 0000000f == 00000000  FBPA5 training done
+      FBPA0 status a  trained delays 6a8=1f1f1f1f 6ac=1f1f1f1f
+      FBPA1 status a  trained delays 6a8=1f1f1f1f 6ac=1f1f1011
+      FBPA2 status a  trained delays 6a8=1f1f1f1f 6ac=1f1f1f1f
+      FBPA3 status a  trained delays 6a8=171f1f1f 6ac=1f171f1f
+      FBPA4 status a  trained delays 6a8=1f1f0709 6ac=1f1f1f1f
+      FBPA5 status a  trained delays 6a8=1d1f1f1f 6ac=1f1a1f1f
+Traceback (most recent call last):
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/mclk.py", line 512, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/mclk.py", line 505, in main
+    reclock(c, v, idx, mhz, live="--live" in sys.argv)
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/mclk.py", line 475, in reclock
+    train_tail(s, fbpas, rc, rm)
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/mclk.py", line 318, in train_tail
+    train(s, fbpas, 0xbc0f0000, data, "train")
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/mclk.py", line 291, in train
+    raise RuntimeError("training did not complete on FBPA %s" % bad)
+RuntimeError: training did not complete on FBPA [0, 1, 2, 3, 4, 5]

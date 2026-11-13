@@ -1,0 +1,85 @@
+0x101000 = 0x00400080: strap 0 -> ramcfg index 0 (BIT M xlat @0x4c42)
+target 810 MHz: rammap band 1 (541..1299), timing 1, bank 1, refpll coef 00023b01, FBPAs [0, 1, 2, 3, 4, 5]; DRY RUN
+  ramcfg {'timing': 1, 'r01_01': 0, 'r01_02': 0, 'r01_04': 0, 'r01_08': 0, 'r01_10': 0, 'DLLoff': 1, 'r01_40': 1, 'r01_80': 0, 'r02_03': 2, 'r02_04': 1, 'r02_08': 1, 'r02_10': 1, 'r02_40': 0, 'r02_80': 1, 'r03_0f': 0, 'r03_30': 1, 'r03_c0': 1, 'r03_f0': 5, 'r04': 6, 'r06': 0, 'r07_02': 1, 'r07_04': 1, 'r07_08': 0, 'r07_10': 0, 'r07_40': 1, 'r07_80': 0, 'r08_01': 1, 'r08_02': 0, 'r08_04': 1, 'r08_08': 0, 'r08_10': 0, 'r08_20': 0, 'r09': 1}
+  timing WL 5 CL 9 WR 7, words 07162d12 2411c289 aa070411 2200194a d3618032 a6b270a2 0100860b 00c35000 0a023900 00000006 09144444
+  [bank] program bank 1 from the VBIOS mode script
+    wr 9a065c <- 00000010  write bank 1  (was 00000000)
+    script 1: wr 98467c <- fff10000
+    script 1: wr 984708 <- 00030002
+    script 1: wr 9a070c <- 00004d4d
+    script 1: wr 9006a0 <- 12121212
+    script 1: wr 9006a4 <- 12121212
+    script 1: wr 9046a0 <- 12121212
+    script 1: wr 9046a4 <- 12121212
+    script 1: wr 9086a0 <- 12121212
+    script 1: wr 9086a4 <- 12121212
+    script 1: wr 9846a8 <- 0f0f0f0f
+    script 1: wr 9846ac <- 0f0f0f0f
+    wr 9a065c <- 00000000  restore write bank  (was 00000010)
+  [enter] stop refresh, precharge, self-refresh
+    wr 9a0200 <- 028f9000    (was 028f9800)
+    wr 9a0910 <- 000c0000  train pre  (was 00000000)
+    wr 9a0914 <- 000c0000  train pre  (was 000a0000)
+    wr 9a0210 <- 00005b5b  REFRESH_AUTO = 0  (was 80005b5b)
+    wr 9a0310 <- 00000001  REFRESH
+    wr 9a0200 <- 828f9000    (was 028f9000)
+    wr 9a0314 <- 00000001  PRECHARGE
+    wr 9a0200 <- 028f9000    (was 828f9000)
+    wr 9a0090 <- 00000061  
+    wr 9a0090 <- c000007f  self-refresh enter
+    wr 9a0698 <- 00000000  
+    wr 9a069c <- 00000000  
+  [clock] refpll 00043b01 -> 00023b01
+    wr 1373f4 <- 00010011    (was 00000011)
+    wr 1373f4 <- 00010010  mclk source off  (was 00010011)
+    wr 1373f4 <- 00010000    (was 00010010)
+    wr 132020 <- 20030000  refpll off  (was 20030001)
+    wr 137320 <- 00000000  
+    wr 132024 <- 00023b01  refpll coefficients
+    wr 132028 <- 100c0010    (was 10040010)
+    wr 132020 <- 20030001  refpll on  (was 20030000)
+    wait 137390 & 00020000 == 00020000  refpll lock
+    wr 132028 <- 10040010    (was 100c0010)
+    wr 1373f4 <- 00010100    (was 00010000)
+    wr 1373f4 <- 00010110    (was 00010100)
+    wr 1373f4 <- 00010111  mclk source = refpll  (was 00010110)
+    wr 1373f4 <- 00000111    (was 00010111)
+  [config] band 1 settings and timings
+    wr 9a0670 <- b4081306    (was 34081306)
+    wr 9a065c <- 00000011  active bank
+    wr 9a06b8 <- 01010101  
+    wr 9a06bc <- 01010101  
+    wr 9a0698 <- 00000000  
+    wr 9a069c <- 00000000  
+    wr 9a0670 <- 34081306    (was b4081306)
+    wr 9a0248 <- 09144444  timing[10]  (was 05144444)
+    wr 9a0290 <- 07162d12  timing[0]  (was 040c170a)
+    wr 9a0294 <- 2411c289  timing[1]  (was 24110289)
+    wr 9a0298 <- aa070411  timing[2]  (was aa040311)
+    wr 9a02cc <- 0a023900  timing[8]  (was 0a013900)
+    wr 9a0808 <- 7aa00050    (was 48000070)
+    wr 9a024c <- 0904062b    (was 0504062b)
+  [exit] self-refresh exit, refresh on
+    wr 9a0090 <- 4000007e  self-refresh exit
+    wr 9a0314 <- 00000001  PRECHARGE
+    wr 9a0310 <- 00000001  REFRESH
+    wr 9a0210 <- 80005b5b  REFRESH_AUTO = 1  (was 00005b5b)
+    wr 9a0300 <- 00000325  MR0 WL 5 CL 9 WR 7  (was 00000025)
+    wr 9a0200 <- 828f9000    (was 028f9000)
+    wr 9a0318 <- 00000001  NOP
+    wr 9a0200 <- 028f9000    (was 828f9000)
+  [train]
+    wr 9a0910 <- 980a0000  train  (was 000c0000)
+    wr 9a0914 <- 980a0000  train  (was 000c0000)
+    wait 900974 & 0000000f == 00000000  FBPA0 training done
+    wait 904974 & 0000000f == 00000000  FBPA1 training done
+    wait 908974 & 0000000f == 00000000  FBPA2 training done
+    wait 90c974 & 0000000f == 00000000  FBPA3 training done
+    wait 910974 & 0000000f == 00000000  FBPA4 training done
+    wait 914974 & 0000000f == 00000000  FBPA5 training done
+    wr 9a0830 <- 01271099    (was 00271099)
+    wr 9a0830 <- 00271099    (was 01271099)
+    wr 9a0910 <- 19080000  train 07_02  (was 980a0000)
+    wr 9a0914 <- 19080000  train 07_02  (was 980a0000)
+    wr 9a0200 <- 028f9800    (was 028f9000)
+  56 writes

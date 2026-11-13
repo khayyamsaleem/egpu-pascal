@@ -1,0 +1,6 @@
+clk 10000000 cycles: 10000019 cycles in 16460800 ns (globaltimer) -> SM clock 608 MHz; launch 16.47 ms
+clk 200000000 cycles: 200000005 cycles in 329218048 ns (globaltimer) -> SM clock 608 MHz; launch 329.23 ms
+bw_copy   64 MiB grid  224 x 256: 2.174 ms  traffic 61.7 GB/s  spot-check ok
+bw_copy   64 MiB grid  896 x 256: 2.163 ms  traffic 62.0 GB/s  spot-check ok
+bw_copy  256 MiB grid  224 x 256: 8.706 ms  traffic 61.7 GB/s  spot-check ok
+bw_copy  256 MiB grid  896 x 256: 8.656 ms  traffic 62.0 GB/s  spot-check ok

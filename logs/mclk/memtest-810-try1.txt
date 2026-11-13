@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/memtest.py", line 79, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/memtest.py", line 33, in main
+    dev = nvpascal.Device()
+          ^^^^^^^^^^^^^^^^^
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/nvpascal.py", line 132, in __init__
+    self._submit(compute.compute_state(TLS_VA, TLS_PER_SM, CODE_VA), "compute state")
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/nvpascal.py", line 477, in _submit
+    raise RuntimeError("submission %r did not complete: %s" % (what, self.ch.status()))
+RuntimeError: submission 'compute state' did not complete: GP_GET=0 GP_PUT=1 chan=11000003 FIFO_INTR=10000000

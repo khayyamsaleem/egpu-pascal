@@ -1,0 +1,41 @@
+0x101000 = 0x00400080: strap 0 -> ramcfg index 0 (BIT M xlat @0x4c42)
+retrain band 1 bank 1, FBPAs [0, 1, 2, 3, 4, 5]; LIVE
+    script 1: wr 98467c <- fff10000
+    script 1: wr 984708 <- 00030002
+    script 1: wr 9a070c <- 00004d4d
+    script 1: wr 9006a0 <- 12121212
+    script 1: wr 9006a4 <- 12121212
+    script 1: wr 9046a0 <- 12121212
+    script 1: wr 9046a4 <- 12121212
+    script 1: wr 9086a0 <- 12121212
+    script 1: wr 9086a4 <- 12121212
+    script 1: cond [0x30] -> True (override)
+    script 1: wr 90c6a0 <- 12121212
+    script 1: wr 90c6a4 <- 12121212
+    script 1: cond [0x31] -> True (override)
+    script 1: wr 9106a0 <- 12121212
+    script 1: wr 9106a4 <- 12121212
+    script 1: wr 9146a0 <- 12121212
+    script 1: wr 9146a4 <- 12121212
+    script 1: wr 9846a8 <- 0f0f0f0f
+    script 1: wr 9846ac <- 0f0f0f0f
+  [train]
+    wr 9a0910 <- 980a0000  train  (was 180a0000)
+    wr 9a0914 <- 980a0000  train  (was 180a0000)
+    wait 900974 & 0000000d == 00000000  FBPA0 training done (half partition: bit 1 ignored)
+    wait 904974 & 0000000f == 00000000  FBPA1 training done
+    wait 908974 & 0000000f == 00000000  FBPA2 training done
+    wait 90c974 & 0000000f == 00000000  FBPA3 training done
+    wait 910974 & 0000000f == 00000000  FBPA4 training done
+    wait 914974 & 0000000f == 00000000  FBPA5 training done
+      FBPA0 status 2  trained delays 6a8=1f1f1f1f 6ac=18181b1b
+      FBPA1 status 0  trained delays 6a8=1a1a1b1c 6ac=011e0406
+      FBPA2 status 0  trained delays 6a8=1e1b0102 6ac=191a1d1c
+      FBPA3 status 0  trained delays 6a8=17181b1b 6ac=18181e1e
+      FBPA4 status 0  trained delays 6a8=1a181c1e 6ac=1a1b1d1b
+      FBPA5 status 0  trained delays 6a8=1b191c1e 6ac=1e1e0402
+    wr 9a0830 <- 01271099    (was 00271099)
+    wr 9a0830 <- 00271099    (was 01271099)
+    wr 9a0910 <- 19080000  train 07_02  (was 180a0000)
+    wr 9a0914 <- 19080000  train 07_02  (was 180a0000)
+    wr 9a0200 <- 028f9800    (was 028f9000)

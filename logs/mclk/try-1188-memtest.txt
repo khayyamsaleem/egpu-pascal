@@ -1,0 +1,17 @@
+testing 9 x 1024 MiB = 9.00 GiB of VRAM (PA 0x40000000 .. 0x280000000)
+  PGRAPH intr 400100=00200000 trap 400108=01000000 400118=00000032 code 400110=00000000 400704=800102bc 400708=00000003 status 400700=01242001
+  GPC0: exc 502c90=00000000  TPC0 exc 504508=00000000  SM esr 504648=00000000 50464c=0000017f 504650=00000000 504654=00000001 504730=00000000
+FIFO_INTR=10000000 MMU_FAULT_ID(0x259c)=00000001
+  unit  0 (eng0): inst=0x1160c000 addr=0x1279a9000 hub=0 gpc=1 access=1 client=24 reason=PTE raw=01011802
+Traceback (most recent call last):
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/memtest.py", line 79, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/memtest.py", line 46, in main
+    ns = dev.launch(ks["mt_fill"], (a.grid, 1, 1), (256, 1, 1), struct.pack("<QQI", b.va, n4, seed))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/nvpascal.py", line 482, in launch
+    self.wait_seq(self.launch_async(k, grid, block, params, smem=smem, timed=True))
+  File "/Users/khayyamsaleem/dev/egpu-pascal/pascal/nvpascal.py", line 191, in wait_seq
+    raise RuntimeError("launch %d did not complete (done %d): %s"
+RuntimeError: launch 3 did not complete (done 2): GP_GET=4 GP_PUT=4 chan=17000001 FIFO_INTR=10000000

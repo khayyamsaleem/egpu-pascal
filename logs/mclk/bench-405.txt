@@ -1,0 +1,8 @@
+loaded: fill32@0x1400 (10 regs), clk@0x1700 (12 regs), bw_copy@0x1b00 (15 regs), vadd@0x1e00 (8 regs)
+vadd 65536 elements -> host memory: 0 wrong, 320.7 us
+clk 10000000 cycles: 10000041 cycles in 16461824 ns (globaltimer) -> SM clock 607 MHz; launch 16.47 ms
+clk 200000000 cycles: 200000099 cycles in 329219072 ns (globaltimer) -> SM clock 607 MHz; launch 329.24 ms
+bw_copy   64 MiB grid  224 x 256: 4.456 ms  traffic 30.1 GB/s  spot-check ok
+bw_copy   64 MiB grid  896 x 256: 4.450 ms  traffic 30.2 GB/s  spot-check ok
+bw_copy  256 MiB grid  224 x 256: 18.139 ms  traffic 29.6 GB/s  spot-check ok
+bw_copy  256 MiB grid  896 x 256: 17.799 ms  traffic 30.2 GB/s  spot-check ok

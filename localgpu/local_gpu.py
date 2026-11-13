@@ -8,8 +8,10 @@
   local-gpu status | models | pull M | logs [server|shimd|proxy] | bench [M] | stop [--all]
 
 What `serve` does, skipping whatever is already up:
-  1. the card: devinit + fb if cold, reset_engines + gr if GR is down, then pascal/shimd.py
-     (the driver server; it holds the card and keeps the Mac awake)
+  1. the card: devinit + fb if cold; the memory reclocked to --mclk (default 1080 MHz, boot is
+     405; pascal/mclk.py) and proven with a 9 GiB VRAM pattern test, stepping down to 810 and
+     then 405 on failure; reset_engines + gr; then pascal/shimd.py (the driver server; it holds
+     the card and keeps the Mac awake)
   2. the runtime container: `llamacpp` (llama.cpp built for sm_61 + shim/build-cuda12), or
      `maxnightly` for MAX models (*-max)
   3. the model: downloaded once into the container's /models volume (resumable)
@@ -138,7 +140,48 @@ def card_scripts(*names_args):
             die("%s failed:\n%s" % (args[0], out[-2500:]))
 
 
-def ensure_card(vram_gib):
+MCLK_DEFAULT = int(os.environ.get("LOCAL_GPU_MCLK", "1080"))
+MCLK_FALLBACK = 810
+
+
+def card_out(*args):
+    r = sh([VENV_PY] + list(args), cwd=REPO, check=False)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def set_mclk(mhz, gr_up=False):
+    """Reclock the memory (pascal/mclk.py), reload GR, and prove the VRAM with a 9 GiB pattern
+    test. Returns the clock actually in use; on any failure re-POSTs and steps down."""
+    for target in [mhz] + [f for f in (MCLK_FALLBACK,) if f < mhz]:
+        rc, cur = card_out("pascal/mclk.py", "get")
+        cur = int(cur.split()[-1]) if rc == 0 and cur.split() else 0
+        if cur != target:
+            say("memory clock %d -> %d MHz (pascal/mclk.py)" % (cur or 405, target))
+            rc, out = card_out("pascal/mclk.py", "set", str(target), "--live")
+            if rc:
+                say("  reclock to %d MHz failed: %s" % (target, out.strip().splitlines()[-1][:200]))
+                repost(); gr_up = False; continue
+            gr_up = False
+        if not gr_up:
+            card_scripts(("pascal/reset_engines.py",), ("pascal/gr.py",))
+        rc, out = card_out("pascal/memtest.py", "--gib", "9", "--seeds", "2")
+        res = [l for l in out.splitlines() if "bandwidth" in l or "RESULT" in l]
+        if rc == 0 and "PASS" in out:
+            say("  VRAM verified at %d MHz: %s" % (target, res[0].strip() if res else ""))
+            return target
+        say("  VRAM test FAILED at %d MHz (%s); re-POST and step down" % (target, " ".join(res)[-200:] or out.strip()[-200:]))
+        repost(); gr_up = False
+    say("staying at the boot memory clock (405 MHz)")
+    card_scripts(("pascal/reset_engines.py",), ("pascal/gr.py",))
+    return 405
+
+
+def repost():
+    card_scripts(("pascal/devinit.py", "firmware/gp102_vbios.rom"), ("pascal/fb.py",))
+
+
+def ensure_card(vram_gib, mclk=None):
+    mclk = MCLK_DEFAULT if mclk is None else mclk
     if shimd_info():
         return
     if not os.path.exists(VENV_PY):
@@ -155,7 +198,9 @@ def ensure_card(vram_gib):
         say("card is cold: running devinit + fb (~20 s)")
         card_scripts(("pascal/devinit.py", "firmware/gp102_vbios.rom"), ("pascal/fb.py",))
         gr = 0
-    if not gr:
+    if mclk and mclk != 405:
+        set_mclk(mclk, gr_up=bool(gr))     # reloads GR when it reclocks
+    elif not gr:
         say("starting the graphics engine (reset_engines + gr)")
         card_scripts(("pascal/reset_engines.py",), ("pascal/gr.py",))
     spawn("shimd", [VENV_PY, "-u", "pascal/shimd.py", "--vram-limit-gib", str(vram_gib)], cwd=REPO)
@@ -268,7 +313,7 @@ def serve(a):
     runtime = m.get("runtime", "llama")
     ensure_llama_container() if runtime == "llama" else ensure_max_container()
     ensure_model(name, m)
-    ensure_card(a.vram_gib)
+    ensure_card(a.vram_gib, getattr(a, "mclk", None))
     stop_servers()
     t0 = time.time()
     if runtime == "llama":
@@ -385,7 +430,7 @@ def cmd_bench(a):
     name, m = resolve(a.model)
     if m.get("runtime") == "max":
         die("bench runs llama.cpp models")
-    ensure_llama_container(); ensure_model(name, m); ensure_card(a.vram_gib)
+    ensure_llama_container(); ensure_model(name, m); ensure_card(a.vram_gib, getattr(a, "mclk", None))
     stop_servers()
     say("llama-bench %s (prompt 512, generate 128); the server is stopped while it runs" % name)
     dexec(LLAMA_CT, "%s /opt/llama-build/bin/llama-bench -m /models/%s -ngl 99 -fa 1 -p 512 -n 128 -r 2"
@@ -409,6 +454,9 @@ def main():
             p.add_argument("--model", "-m", default=os.environ.get("LOCAL_GPU_MODEL", DEFAULT))
         p.add_argument("--ctx", type=int, default=0, help="context length (default: per model)")
         p.add_argument("--vram-gib", type=float, default=10.0)
+        p.add_argument("--mclk", type=int, default=MCLK_DEFAULT,
+                       help="memory clock in MHz to run at (default %(default)s; 405 = boot clock, no reclock; "
+                            "verified on this card up to 1134). Env LOCAL_GPU_MCLK.")
         p.add_argument("--quiet", action="store_true")
         return p
     common(sub.add_parser("serve", help="start serving (default command)"))

@@ -1,0 +1,3 @@
+seed deadbeef: 0 bad words over 9.00 GiB
+write bandwidth 68.0 GB/s (min 57.5), read bandwidth 92.0 GB/s (min 91.8); 25 s
+RESULT: PASS

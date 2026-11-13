@@ -61,9 +61,17 @@ class Server:
         self.lock = threading.Lock()          # one GPU, one op at a time (each shim .so has its own socket)
         print("shimd: GP102 up in %.1f s; VRAM limit %.1f GiB" % (time.time() - t0, limit / 2**30), flush=True)
 
+    def mem_khz(self):
+        """Live memory clock (pascal/mclk.py reclocks it before shimd starts); boot value if unreadable."""
+        try:
+            from mclk import live_mclk_mhz
+            return (live_mclk_mhz(self.dev.c) or 405) * 1000
+        except Exception:                                   # noqa: BLE001
+            return 405000
+
     # -------------------------------------------------------------- ops
     def info(self, p):
-        return struct.pack("<QQIII", self.limit - self.used, self.limit, 28, 607000, 405000)
+        return struct.pack("<QQIII", self.limit - self.used, self.limit, 28, 607000, self.mem_khz())
 
     def alloc(self, p, owner=None):
         (n,) = struct.unpack("<Q", p)

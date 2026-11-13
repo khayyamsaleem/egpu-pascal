@@ -1,0 +1,4 @@
+seed 00000000: 0 bad words over 9.00 GiB
+seed ffffffff: 0 bad words over 9.00 GiB
+write bandwidth 66.5 GB/s (min 62.2), read bandwidth 92.0 GB/s (min 91.8); 61 s
+RESULT: PASS

@@ -1,0 +1,20 @@
+
+
+---
+
+## How a Refrigerator Works: A Detailed Explanation
+
+A refrigerator is essentially a heat pump that moves heat from a cold area (the inside of the fridge) to a warmer area (the kitchen). It achieves this by circulating a special fluid called **refrigerant** through a closed loop, exploiting the physical property that certain fluids absorb heat when they change state (evaporate) and release heat when they change state (condense).
+
+The entire process relies on four main components working in sequence: the **Compressor**, the **Condenser**, the **Expansion Valve**, and the **Evaporator**.
+
+---
+
+### 1. The Compressor (The Pump)
+
+The compressor is the heart of the refrigeration system. Its job is to take the low-pressure, cool refrigerant gas that has just absorbed heat and pump it into a high-pressure, high-temperature gas.
+
+*   **Function:** It acts as a pump, using mechanical energy (from the electricity) to compress the refrigerant vapor.
+*   **Process:** As the gas is compressed, its pressure and temperature rise significantly. This high-pressure, hot gas is then routed to the condenser.
+
+### 2. The Condenser (The Heat Releaser)

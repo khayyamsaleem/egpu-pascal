@@ -1,0 +1,2 @@
+0x101000 = 0x00400080: strap 0 -> ramcfg index 0 (BIT M xlat @0x4c42)
+not on the refpll path (0x1373f4 src 0, MPLL on False): refusing
