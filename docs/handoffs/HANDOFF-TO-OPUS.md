@@ -65,8 +65,17 @@ OPEN TASKS, RE-RANKED AGAIN (supersedes the session-12 A/B/C list further down):
      launch, and QMD_GROUP_ID does nothing.  WAIT_FOR_IDLE is load-bearing; the ~5-7% is not
      reachable this way.  Harness kept for the v01_07 idea: pascal/test_depchain.py (needs
      NVPASCAL_CHAIN_ALLOW_UNSAFE=1).
-  C. SM clock via the FLL (NAFLL) + voltage: what NVIDIA's PMU firmware does; hard, and a voltage
-     write needs the user's explicit OK.  This is where the remaining headroom actually is.
+  C. SM clock: harness built and rollback proven, the change NOT yet found (session 15, RESULTS.md
+     section 15).  pascal/smclk.py does snapshot/diff/restore (413 registers), a same-value
+     writability probe, --apply with read-back verification and auto-restore, --verify (measures the
+     real clock on the card via the trim counter) and --test (the two-test protocol).  Measured: the
+     card sits at P8 (607 MHz actual; the perf table's P0 row asks ~797, so the lever is ~1.3x, not
+     2.4x -- the VBIOS quotes at 2x); the PLL-shaped block at 0x137024 (M=1, N=66, P=1) IS
+     host-writable, but writing N 66 -> 67 changed the clock by nothing (measured), so it needs a
+     strobe or is not the GPC source.  Next candidates: 0x137044 (second copy), 0x137020's strobe
+     bits, and the 0x137300 divider words (0x137310 = 0x87101616, 0x137330 = 0x87100634) -- each one
+     a measured single-variable write with the snapshot armed.  A mistake can wedge the GPU, so this
+     is a hunt to run deliberately, not in passing.
   D. Model-side, no hardware: KV cache q8_0 was measured and REJECTED this session (168 s /
      12.6 tok/s vs 159 s / 13.4 tok/s) -- see RESULTS.md section 12.  Requantising the Q6_K output
      tensor is still untried (~170 MB/token less, ~+3%, i.e. inside this card's run-to-run noise).

@@ -642,3 +642,51 @@ The chain code stays in the tree for that future experiment, doubly gated (`NVPA
 `NVPASCAL_CHAIN_ALLOW_UNSAFE=1`) so no environment variable can break this stack by accident. That
 leaves the SM clock (task C) as the only remaining decode lever.
 
+## 15. SM clock: the harness, the rollback, and what the card actually allows (session 15)
+
+Task C is not solved, but it now has a safe instrument, a rollback that has been *exercised*, and one
+real measurement of what this card permits -- which is what was missing.
+
+Why it is hard (reference notes, docs/reference/README.md): the GP102 GPC clock is FLL/ADC (NAFLL),
+not a PLL -- the Kepler GPCPLL at 0x137000 reads `0xbadf` here -- and nvgpu, the only open reference,
+never writes FLL registers from the host: it parses VBIOS tables (BIT 'C' FLL device table, entry 4 at
+0x755c) and hands them to PMU firmware as board objects (`clk_fll.c`). There is no published host-side
+FLL map to program.
+
+Headroom, from the VBIOS's own perf table (read-only, `pascal/vbios_perf.py`): the card boots and stays
+at **P8** -- memory 405 MHz, gpc2clk 1215 quoted = the measured **607 MHz** actual -- while the **P0**
+row asks for 1594 quoted (~797 actual). So this lever is worth about **1.3x**, not the 2.4x that
+comparing 607 with the 1480 MHz base clock suggests: the VBIOS quotes these clocks at 2x the rate the
+hardware counts, exactly the convention the memory clock turned out to have (section 13).
+
+New tool, `pascal/smclk.py` -- rollback first, because the only recovery from a bad clock write is a
+power cycle of the enclosure, i.e. the user's hands:
+
+| command | what it does |
+|---|---|
+| `--verify` | measures the real GPC clock on the card (the trim counter of section 13) -- a register read-back proves nothing on its own |
+| `--scan` | read-only dump of the clock/voltage register families |
+| `--snapshot F` / `--diff F` / `--restore F` | 413 registers as JSON + checksum; compare against the card; write back and verify every read-back |
+| `--probe` | same-value writes: maps host-writability without changing any value |
+| `--apply ADDR:VALUE` | one write, read-back verified, auto-restores that register if the read-back disagrees |
+| `--test` | prints the two-test protocol: change present (measured), inference faster (same argument set) |
+
+Measured, in order: baseline **GPC 607.0 MHz, DRAM f_CK 537.1**; snapshot 413 registers (checksum
+`cf766bc1eaa0e470`); the scan found a PLL-shaped block at **0x137000-0x137100** mirroring the memory
+PLL's layout (`0x137020 = 0x00030010` control, `0x137024 = 0x10814201` coefficient -> M=1, **N=66**,
+P=1 on `mclk.py`'s decoder), i.e. a plausible SYS/GPC PLL; the probe showed all four of those registers
+are **host-writable** (read-back exact); and a single-variable write of N 66 -> 67
+(`0x10814201 -> 0x10814301`) read back correctly and **changed nothing** -- gpc2clk stayed at 44995
+counts (607.00) before and after, with sys/xbar/dram unmoved too.
+
+So that coefficient alone does not steer the GPC clock: it needs a strobe/enable the block's control
+word has not been shown to have, or it drives a different domain. Rollback was then exercised for real
+(`--restore` put `0x137024` back, `--diff` reported 0 registers differing, the clock measured 607.0
+again), so the harness is proven in both directions.
+
+Remaining candidates, each needing its own measured single-variable write with the snapshot armed: the
+second copy `0x137044`, the control word `0x137020`'s strobe bits, and the 0x137300 block's
+divider-shaped words (`0x137310 = 0x87101616`, `0x137330 = 0x87100634`). That is the same shape as the
+memory-clock work, which took several sessions of measured attempts -- except a mistake here can wedge
+the GPU. **No SM clock change is claimed, and nothing was left modified.**
+
