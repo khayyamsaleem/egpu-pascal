@@ -5,8 +5,8 @@ press TAB to list them all (TAB completes commands, and bundle/tool names after 
 an ambiguous TAB prints the candidates), `/help <fuzzy>` ranks them by a query, and an unknown
 command gets a did-you-mean.  Thinking (reasoning_content) is shown dimmed.  Standard library only.
 
-Tools are a **registry, not a fixed list**: every tool belongs to a bundle (web, repo, compute, edit,
-memory, time, demo) and only the active ones are sent in a request, so the prompt stays small.
+Tools are a **registry, not a fixed list**: every tool belongs to a bundle (web, repo, compute, market,
+edit, memory, time, demo) and only the active ones are sent in a request, so the prompt stays small.
 Activation is conditional -- the bundle whose keywords match the user's message is loaded for that
 turn -- and summonable -- the model can call `use_tools` to load more, and calling a tool that
 isn't loaded yet loads it and retries.  `edit` (write_file, run_command, python) never auto-loads
@@ -14,7 +14,7 @@ and every call in it asks first unless `--yes`.  `--tools` turns the harness on 
 loading only), `--tools=web,repo` pins those bundles, `--tools=all` pins everything; `/load` and
 `/unload` do the same inside the session.  File paths are confined to `--root`.
 """
-import ast, datetime, html, json, os, re, subprocess, sys, time, urllib.parse, urllib.request
+import ast, datetime, html, json, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 DIM, RESET = ("\033[2m", "\033[0m") if sys.stdout.isatty() else ("", "")
 MAX_ITER = 8                                   # tool round trips per turn
@@ -26,6 +26,7 @@ BUNDLES = {
     "web": "search the web and read pages",
     "repo": "files, grep and read-only git in the working root",
     "compute": "arithmetic (no side effects)",
+    "market": "stock quotes and exchange rates",
     "edit": "write files, run shell and Python -- each one asks first, and nothing here auto-loads",
     "memory": "notes that outlive /clear",
     "time": "the clock (models hallucinate dates)",
@@ -43,6 +44,8 @@ BUNDLE_KEYWORDS = {
     "compute": ("calculat", "compute", "how many", "average", "percent", "convert",
                 "arithmetic", "sum of"),
     "memory": ("remember", "recall", "note that", "forget"),
+    "market": ("stock", "ticker", "share price", "shares of", "market cap", "trading at",
+               "nasdaq", "nyse", "s&p", "exchange rate", "fx rate", "stock price", "quote for"),
     "time": ("what time", "the date", "today's date", "what day", "utc"),
 }
 
@@ -233,6 +236,13 @@ register("run_command", "edit", "Run a shell command in the working root (asks f
 # compute
 register("calc", "compute", "Evaluate an arithmetic expression exactly (no side effects)",
          {"expression": S}, ["expression"])
+# market
+register("stock_quote", "market",
+         "Quote(s) for stocks, ETFs, indices and crypto: price, change, day range, volume. "
+         "Symbols like AAPL, MSFT, NVDA, 7203.T, ^GSPC, BTC-USD",
+         {"symbols": S, "detail": {"type": "boolean"}}, ["symbols"])
+register("fx_rate", "market", "Exchange rates (ECB, via frankfurter.dev)",
+         {"base": S, "to": S}, [])
 register("python", "edit", "Run a short Python snippet and return its output (asks first)",
          {"code": S}, ["code"], gated=True)
 # memory
@@ -272,14 +282,19 @@ def _refused(what, auto_yes):
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/124.0 Safari/537.36")
+# Yahoo's edge 429s the full browser UA above on sight, but answers a plain one -- measured, not
+# guessed: "Mozilla/5.0" -> 200 with a real quote, the long Chrome string -> 429, same request.
+UA_MIN = "Mozilla/5.0"
 # The self-hosted SearXNG behind `web_search`: either a directly reachable base URL, or
 # "ssh-host|docker-ip:port" for the one-hop ssh route (cherryblossom's instance publishes no port).
 SEARXNG_URL = os.environ.get("LOCAL_GPU_SEARXNG_URL", "")
 SEARXNG_SSH = os.environ.get("LOCAL_GPU_SEARXNG_SSH", "root@cherryblossom|172.17.0.19:8080")
 
 
-def _get(url, timeout=25):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en"})
+def _get(url, timeout=25, headers=None):
+    h = {"User-Agent": UA, "Accept-Language": "en-US,en"}
+    h.update(headers or {})
+    req = urllib.request.Request(url, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
 
@@ -377,6 +392,171 @@ def fetch_url(url, max_chars=6000):
             return ("live fetch failed (%s).  ARCHIVED COPY (as archived %s) -- a snapshot, not the "
                     "live page:\n%s\n\n%s" % (e, c.get("timestamp"), c["url"], snap[:max_chars]))
         return "could not fetch %s: %s (no Wayback copy either)" % (url, e)
+
+
+def _num(x, dp=2):
+    """1234567.891 -> '1,234,567.89' (a big number with 0 dp for volumes)."""
+    if x is None:
+        return "?"
+    try:
+        if dp == 0 or abs(float(x)) >= 100000:
+            return "{:,.0f}".format(float(x))
+        return "{:,.{d}f}".format(float(x), d=dp)
+    except (TypeError, ValueError):
+        return str(x)
+
+
+def _chg(price, prev):
+    if price is None or not prev:
+        return ""
+    d, p = price - prev, (price - prev) / prev * 100
+    return "%+.2f (%+.2f%%) vs prev close %s" % (d, p, _num(prev))
+
+
+def _yahoo_raw(sym):
+    """One chart response.  Two things this endpoint needs: the plain UA (its edge 429s a full
+    browser one) and a host/backoff retry, because it rate-limits per IP on a burst."""
+    url = "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=1d"
+    last = None
+    for host in ("query1", "query2"):
+        for attempt in (0, 1):
+            try:
+                return json.loads(_get(url % (host, urllib.parse.quote(str(sym))),
+                                       headers={"User-Agent": UA_MIN}))
+            except urllib.error.HTTPError as e:
+                last = e
+                if e.code in (429, 500, 502, 503) and attempt == 0:
+                    time.sleep(2.0)
+                    continue
+                break
+            except Exception as e:
+                last = e
+                break
+    raise RuntimeError("yahoo: %s" % last)
+
+
+def _yahoo_quote(sym, detail=False):
+    """Yahoo's keyless chart endpoint: works worldwide (non-US listings, indices, BTC-USD), gives
+    OHLCV -- and rate-limits, which is why the Nasdaq route exists for plain US tickers."""
+    j = _yahoo_raw(sym)
+    chart = j.get("chart") or {}
+    if chart.get("error") or not chart.get("result"):
+        raise RuntimeError((chart.get("error") or {}).get("description") or "no data")
+    r = chart["result"][0]
+    m = r.get("meta") or {}
+    q = ((r.get("indicators") or {}).get("quote") or [{}])[0]
+    price = m.get("regularMarketPrice") or (q.get("close") or [None])[0]
+    prev = m.get("previousClose") or m.get("chartPreviousClose")
+    bits = ["%s %s %s" % (m.get("symbol") or sym, _num(price), m.get("currency") or ""),
+            _chg(price, prev)]
+    if m.get("marketState"):
+        bits.append(m["marketState"].lower())
+    if q.get("low") and q.get("high"):
+        bits.append("day %s-%s" % (_num(q["low"][0]), _num(q["high"][0])))
+    if q.get("volume") and q["volume"][0]:
+        bits.append("vol %s" % _num(q["volume"][0], 0))
+    if m.get("exchangeName"):
+        bits.append(m["exchangeName"])
+    if m.get("regularMarketTime"):
+        bits.append(time.strftime("%Y-%m-%d %H:%M", time.localtime(m["regularMarketTime"])))
+    return "[yahoo] " + ", ".join(b for b in bits if b)
+
+
+def _nasdaq_quote(sym, detail=False):
+    """api.nasdaq.com (declared User-Agent, no key): US listings only, but it has the company
+    name, market cap and 52-week range that the Yahoo chart endpoint does not."""
+    h = {"Accept": "application/json"}
+    info = json.loads(_get("https://api.nasdaq.com/api/quote/%s/info?assetclass=stocks"
+                           % urllib.parse.quote(str(sym)), headers=h)).get("data") or {}
+    if not info:
+        raise RuntimeError("no data (US listings only)")
+    p = info.get("primaryData") or {}
+    bits = ["%s %s" % (info.get("symbol") or sym, p.get("lastSalePrice") or "?"),
+            "%s %s" % (p.get("netChange") or "", p.get("percentageChange") or "")]
+    if info.get("companyName"):
+        bits.append(info["companyName"])
+    if p.get("volume") and p["volume"] != "N/A":
+        bits.append("vol %s" % p["volume"])
+    if info.get("marketStatus"):
+        bits.append(info["marketStatus"].lower())
+    if detail:
+        try:
+            s = (json.loads(_get("https://api.nasdaq.com/api/quote/%s/summary?assetclass=stocks"
+                                 % urllib.parse.quote(str(sym)), headers=h)).get("data") or {}).get("summaryData") or {}
+            for k in ("MarketCap", "FiftTwoWeekHighLow", "PreviousClose", "Sector"):
+                if (s.get(k) or {}).get("value"):
+                    bits.append("%s %s" % (s[k]["label"].lower(), s[k]["value"]))
+        except Exception:
+            pass
+    return "[nasdaq] " + ", ".join(b.strip() for b in bits if b and b.strip())
+
+
+COINGECKO = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "DOGE": "dogecoin",
+             "XRP": "ripple", "ADA": "cardano", "LTC": "litecoin", "BNB": "binancecoin",
+             "AVAX": "avalanche-2", "DOT": "polkadot", "LINK": "chainlink", "MATIC": "matic-network",
+             "TON": "the-open-network", "SHIB": "shiba-inu", "TRX": "tron", "XMR": "monero"}
+CRYPTO_PAIR = re.compile(r"[A-Z]{2,6}[-/](USD|USDT|EUR|USDC)")
+
+
+def _coingecko_quote(sym, detail=False):
+    """Crypto pairs (BTC-USD) through CoinGecko's keyless endpoint: the one source here that is not
+    rate-limits-by-IP on a burst."""
+    base = re.split(r"[-/]", str(sym))[0]
+    cid = COINGECKO.get(base)
+    if not cid:
+        raise RuntimeError("no CoinGecko id for %s (known: %s)" % (base, ", ".join(sorted(COINGECKO))))
+    d = (json.loads(_get("https://api.coingecko.com/api/v3/simple/price?ids=%s&vs_currencies=usd"
+                         "&include_24hr_change=true" % cid)) or {}).get(cid) or {}
+    if not d.get("usd"):
+        raise RuntimeError("no price for %s" % cid)
+    chg = d.get("usd_24h_change")
+    return "[coingecko] %s $%s USD%s" % (sym, _num(d["usd"]),
+                                         (" (%+.2f%% 24h)" % chg) if chg is not None else "")
+
+
+def stock_quote(symbols="", detail=False):
+    """Quotes for one or more symbols (AAPL, MSFT, 7203.T, BTC-USD ...).
+
+    A plain US ticker goes to Nasdaq first (no rate limit, and it carries the company name, market
+    cap and 52-week range); a crypto pair (BTC-USD) goes to CoinGecko; anything else -- a foreign
+    listing like 7203.T, an index like ^GSPC -- goes to Yahoo first, because Nasdaq only serves US
+    listings.  Either way the answer says which source it came from.
+    """
+    syms = [s for s in re.split(r"[,\s]+", str(symbols).upper()) if s][:8]
+    if not syms:
+        return "no symbol given -- try AAPL, MSFT, NVDA, 7203.T, ^GSPC, BTC-USD"
+    out = []
+    for s in syms:
+        if CRYPTO_PAIR.fullmatch(s):
+            order = (_coingecko_quote, _yahoo_quote)
+        elif re.fullmatch(r"[A-Z]{1,5}", s):
+            order = (_nasdaq_quote, _yahoo_quote)
+        else:
+            order = (_yahoo_quote, _nasdaq_quote)
+        why = []
+        for fn in order:
+            try:
+                out.append(fn(s, detail))
+                break
+            except Exception as e:
+                why.append("%s: %s" % (fn.__name__.strip("_").split("_")[0], e))
+        else:
+            out.append("%s: no quote (%s)" % (s, "; ".join(why)))
+    return "\n".join(out)
+
+
+def fx_rate(base="USD", to=""):
+    """ECB reference rates through frankfurter.dev -- keyless, daily, no crypto."""
+    base = (base or "USD").upper()
+    syms = ",".join(x for x in re.split(r"[,\s]+", str(to).upper()) if x)
+    j = json.loads(_get("https://api.frankfurter.dev/v1/latest?base=%s%s"
+                        % (base, ("&symbols=" + syms) if syms else "")))
+    rates = j.get("rates") or {}
+    if not rates:
+        raise RuntimeError("no rates for %s" % base)
+    return "[frankfurter/ECB %s] %s -> %s" % (
+        j.get("date"), base,
+        ", ".join("%s %s" % (k, _num(v, 4 if abs(v) < 10 else 2)) for k, v in sorted(rates.items())))
 
 
 def calc(expression):
@@ -523,6 +703,10 @@ def call_tool(name, args, ctx):
         if name == "grep_repo":
             return grep_repo(args.get("pattern", ""), root, args.get("path") or ".",
                              args.get("glob"), int(args.get("max_hits") or 40))
+        if name == "stock_quote":
+            return stock_quote(args.get("symbols", ""), bool(args.get("detail")))
+        if name == "fx_rate":
+            return fx_rate(args.get("base", "USD"), args.get("to", ""))
         p = _under(root, args.get("path"))
         if p is None:
             return "refused: path is outside the working root (%s)" % root

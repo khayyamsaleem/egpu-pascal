@@ -104,6 +104,7 @@ active ones go into a request** -- the default is one tool wide (`use_tools`) an
 |---|---|---|
 | `web` | `web_search` (your own SearXNG first, then keyless fallbacks), `fetch_url` | search / latest / url / news |
 | `repo` | `list_files`, `read_file`, `grep_repo`, `git_cmd` (read-only git) | grep / git / diff / file / repo |
+| `market` | `stock_quote` (Nasdaq for US tickers, Yahoo for foreign/index, CoinGecko for crypto), `fx_rate` (ECB) | stock / ticker / trading at / exchange rate |
 | `compute` | `calc` (AST-checked arithmetic, no side effects) | how many / calculate / percent |
 | `edit` | `write_file`, `run_command`, `python` | **never automatically**, and each call asks first |
 | `memory` | `remember`, `recall` (notes in `~/.local/state/local-gpu/chat-notes.md`) | remember / recall |
@@ -123,7 +124,17 @@ ranks the commands by a query, and a typo gets a did-you-mean.  Up-arrow history
 Checked on the card (session 14): "how many seconds are in 3 days, with the calc tool" loaded
 `compute` and called `calc` -> 259200; "what is the current time" loaded `time` and called `now`;
 asking for Python loaded `edit` on demand, got the confirmation refusal, and re-ran the arithmetic
-with `calc` instead.
+with `calc` instead.  A market question ran three tools across three bundles: "what is NVDA trading
+at, in yen?" auto-loaded `market`, called `stock_quote` then `fx_rate`, and the model then summoned
+`compute` on its own (`use_tools(["compute"])`) to do the multiplication.
+
+Where the market data comes from, and why: **Stooq's keyless CSV is gone** (the old
+`/q/l/?s=...&e=csv` URL 404s now, behind a JS proof-of-work check), so `stock_quote` picks a route
+per symbol -- Nasdaq's `api.nasdaq.com` for plain US tickers (no rate limit, and it carries the
+company name, market cap and 52-week range), Yahoo's keyless chart endpoint for foreign listings
+and indices, CoinGecko for crypto pairs.  One measured gotcha worth keeping: Yahoo's edge returns
+**429 to a full browser User-Agent but 200 to a plain `Mozilla/5.0`**, same request -- the finance
+fetches therefore send the short one.
 
 ## Layout
 
