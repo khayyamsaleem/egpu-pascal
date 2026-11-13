@@ -13,7 +13,8 @@ card reads back, and `status` is the negative control before and after.
                       810 and then 54 MHz steps (big jumps fail training); --jump disables that.
 
 Measured on this card (logs/mclk/, pascal/memtest.py, 9 GiB x 3 patterns unless noted):
-  405 (boot)  31.1 GB/s read   810  64.0   1080  87.3   1134  92.0 (also 100-pass soak + 30 s hold)
+  405 (boot)  31.1 GB/s read   810  64.0   1080  87.3 (200-pass soak at 42 C: clean)
+  1134  92.0: clean cold (36 C, 100 passes) but 17 single-bit flips warm (42 C), top byte lane
   1188, 1296: train but corrupt data -> card faults.  1620 (band 2 config): does not train.
 
 Usage: ~/.venvs/tinygpu/bin/python pascal/mclk.py status

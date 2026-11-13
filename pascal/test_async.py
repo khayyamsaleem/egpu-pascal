@@ -55,6 +55,22 @@ want = (199,) + tuple(max(i for i in range(200) if i % 8 == j) for j in range(8)
 print("dependent chain of 400 queued launches: %s  %s" % (vals == want, "ok" if vals == want else "WRONG %r" % (vals,)))
 ok &= vals == want
 
+# 4b: ordering of big dependent grids -- a 64 MiB fill then a 64 MiB copy of it, no host waits;
+# if a grid could start before the previous one finished, dst would mix old and new values
+big, dst = dev.alloc(64 << 20), dev.alloc(64 << 20)
+bad4b = 0
+for i in range(1, 9):
+    dev.fill_async(big.va, 0x01010101 * i, 64 << 20)
+    dev.copy_async(dst.va, big.va, 64 << 20)
+    dev.fill_async(big.va, 0, 64 << 20)                 # the next round's fill races the copy if unordered
+    got = dev.dtoh(dst.va, 64 << 20)
+    want = bytes([i]) * (64 << 20)
+    if got != want:
+        bad4b += 1
+        print("  big-grid ordering round %d: %d of %d bytes wrong" % (i, sum(a != b for a, b in zip(got[::4096], want[::4096])) * 4096, 64 << 20))
+print("big dependent grids (fill 64 MiB -> copy 64 MiB -> refill), 8 rounds: %s" % ("ok" if not bad4b else "WRONG in %d" % bad4b))
+ok &= not bad4b
+
 # 5: launch throughput, async vs synchronous
 n = 3000
 t0 = time.perf_counter()

@@ -1,0 +1,3 @@
+write bandwidth 65.5 GB/s (min 54.8), read bandwidth 87.4 GB/s (min 87.2); 52 s
+RESULT: PASS
+RESULT: PASS

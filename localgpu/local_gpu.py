@@ -34,7 +34,9 @@ HF = "https://huggingface.co/%s/resolve/main/%s"
 MODELS = {
     "gemma4-e4b": dict(repo="google/gemma-4-E4B-it-qat-q4_0-gguf", file="gemma-4-E4B_q4_0-it.gguf", size=5.15,
                        family="gemma4", params="8B (E4B)", quant="Q4_0", ctx=16384,
-                       desc="Google Gemma 4 E4B, quantization-aware 4-bit: fast, tools, the default"),
+                       desc="Google Gemma 4 E4B, quantization-aware 4-bit: fast, tools, the default",
+                       # its 2.7 GB of per-layer/input embeddings on the card: +10% prompt speed (pp512 764 -> 840)
+                       args="-ot per_layer_token_embd.weight=CUDA0,token_embd.weight=CUDA0"),
     "gemma4-12b": dict(repo="google/gemma-4-12B-it-qat-q4_0-gguf", file="gemma-4-12b-it-qat-q4_0.gguf", size=6.98,
                        family="gemma4", params="12B", quant="Q4_0", ctx=8192,
                        desc="Google Gemma 4 12B, QAT 4-bit: strongest that fits 11 GB, slower"),
@@ -131,6 +133,17 @@ def shimd_info():
         return None
 
 
+def shimd_temp():
+    try:
+        s = socket.create_connection(("127.0.0.1", SHIMD_PORT), timeout=2)
+        s.sendall(struct.pack("<II", 11, 0))
+        st, n = struct.unpack("<iI", s.recv(8))
+        d = s.recv(n); s.close()
+        return struct.unpack("<iI", d[:8])[0] if st == 0 and n >= 8 else None
+    except (OSError, struct.error):
+        return None
+
+
 def card_scripts(*names_args):
     for args in names_args:
         say("  %s" % " ".join(args))
@@ -164,7 +177,9 @@ def set_mclk(mhz, gr_up=False):
             gr_up = False
         if not gr_up:
             card_scripts(("pascal/reset_engines.py",), ("pascal/gr.py",))
-        rc, out = card_out("pascal/memtest.py", "--gib", "9", "--seeds", "2")
+        # 20 passes (~5 s): a marginal lane shows as rare single-bit flips (1134 MHz warm: 17 words
+        # in 100 passes), so a 1-pass check is not enough
+        rc, out = card_out("pascal/memtest.py", "--gib", "9", "--seeds", "5", "--loops", "4")
         res = [l for l in out.splitlines() if "bandwidth" in l or "RESULT" in l]
         if rc == 0 and "PASS" in out:
             say("  VRAM verified at %d MHz: %s" % (target, res[0].strip() if res else ""))
@@ -301,6 +316,20 @@ def stop_servers():
         pass
 
 
+# Measured on the card (logs/bench/, RESULTS.md section 11): backend sampling +1.5-2% decode with identical
+# text; ngram-mod speculation helps text the model has seen (code edits, quoting), 11/12 bench turns
+# byte-identical (batched verification rounds differently). LOCAL_GPU_PLAIN=1 drops both.
+LLAMA_FAST = "" if os.environ.get("LOCAL_GPU_PLAIN") == "1" else "-bs --spec-type ngram-mod"
+
+
+def llama_args(a, m):
+    """Extra llama-server flags: LLAMA_FAST, the model's own (MODELS[..]["args"]), then --llama-args /
+    LOCAL_GPU_LLAMA_ARGS (shell text, appended last so it can override)."""
+    plain = os.environ.get("LOCAL_GPU_PLAIN") == "1"
+    parts = [LLAMA_FAST, "" if plain else m.get("args", ""), getattr(a, "llama_args", "") or ""]
+    return " ".join(x for x in parts if x)
+
+
 def serve(a):
     name, m = resolve(a.model)
     ctx = a.ctx or m["ctx"]
@@ -319,8 +348,8 @@ def serve(a):
     if runtime == "llama":
         say("starting llama-server: %s, context %d" % (name, ctx))
         dexec(LLAMA_CT, "%s SHIM_LOG=/tmp/shim-server.log exec /opt/llama-build/bin/llama-server -m /models/%s "
-              "--alias %s -ngl 99 -fa on -c %d -np 1 -cram 2048 --jinja --host 0.0.0.0 --port 8080 "
-              "> /tmp/llama-server.log 2>&1" % (SHIM_ENV, m["file"], name, ctx), detach=True)
+              "--alias %s -ngl 99 -fa on -c %d -np 1 -cram 2048 --jinja --host 0.0.0.0 --port 8080 %s "
+              "> /tmp/llama-server.log 2>&1" % (SHIM_ENV, m["file"], name, ctx, llama_args(a, m)), detach=True)
         backend, health = "http://127.0.0.1:%d" % LLAMA_PORT, "/health"
         alive = lambda: not dexec(LLAMA_CT, "pgrep -f llama-server >/dev/null", check=False).returncode
         logcmd = (LLAMA_CT, "tail -25 /tmp/llama-server.log")
@@ -373,8 +402,10 @@ def print_endpoints(name, m, cur):
 # ------------------------------------------------------------------ commands
 def cmd_status(a):
     info = shimd_info()
-    print("card     " + ("up: %.1f of %.1f GiB free, SM %d MHz, memory %d MHz" % (
-        info["free"] / 2**30, info["total"] / 2**30, info["sm_mhz"], info["mem_mhz"]) if info else "driver server not running"))
+    t = shimd_temp() if info else None
+    print("card     " + ("up: %.1f of %.1f GiB free, SM %d MHz, memory %d MHz%s" % (
+        info["free"] / 2**30, info["total"] / 2**30, info["sm_mhz"], info["mem_mhz"],
+        ", %d C" % t if t is not None and t >= 0 else "") if info else "driver server not running"))
     cur = current()
     if cur:
         ok = http_ok(cur["backend"] + ("/health" if cur["runtime"] == "llama" else "/v1/models"))
@@ -454,9 +485,12 @@ def main():
             p.add_argument("--model", "-m", default=os.environ.get("LOCAL_GPU_MODEL", DEFAULT))
         p.add_argument("--ctx", type=int, default=0, help="context length (default: per model)")
         p.add_argument("--vram-gib", type=float, default=10.0)
+        p.add_argument("--llama-args", default=os.environ.get("LOCAL_GPU_LLAMA_ARGS", ""),
+                       help="extra llama-server flags, appended to the model's own (env LOCAL_GPU_LLAMA_ARGS)")
         p.add_argument("--mclk", type=int, default=MCLK_DEFAULT,
-                       help="memory clock in MHz to run at (default %(default)s; 405 = boot clock, no reclock; "
-                            "verified on this card up to 1134). Env LOCAL_GPU_MCLK.")
+                       help="memory clock in MHz to run at (default %(default)s; 405 = boot clock, no reclock). "
+                            "1080 passes a 200-pass soak warm; 1134 passes cold but flips bits warm. "
+                            "Env LOCAL_GPU_MCLK.")
         p.add_argument("--quiet", action="store_true")
         return p
     common(sub.add_parser("serve", help="start serving (default command)"))

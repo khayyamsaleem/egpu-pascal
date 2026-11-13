@@ -1,0 +1,3 @@
+write bandwidth 68.0 GB/s (min 57.2), read bandwidth 92.1 GB/s (min 91.9); 25 s
+RESULT: FAIL (17 bad words)
+RESULT: PASS

@@ -427,3 +427,37 @@ per token include many 13-20 us small kernels at a 607 MHz SM clock. The SM cloc
 lever: the Kepler-style GPCPLL at `0x137000` reads `badf` on GP102 (the GPC clock is elsewhere,
 likely NAFLL), and the NVVDD PWM (`0x20340` period 0xa0, `0x20344` duty 0x40) means a GPC
 reclock may need a voltage change -- a different risk class from the memory clock.
+
+## 11. Low-risk tok/s round (session 12, 2026-11-12)
+
+Gemma 4 E4B, 12-turn `bench_chat.py`: **159 s -> 153 s, decode 13.5 -> 14.0 tok/s, prefill
+375 -> 401 tok/s**, from llama.cpp options now on by default in `local-gpu`
+(`LOCAL_GPU_PLAIN=1` turns them off):
+
+| option | effect (measured) | output |
+|---|---|---|
+| `-bs` backend sampling | decode +1.5-2% (13.65 -> 13.9 tok/s) | identical |
+| `--spec-type ngram-mod` | +2-3% on the bench; 15.8 vs 13.4 tok/s on text it has seen | 11/12 turns identical (batched verification rounds differently) |
+| E4B embeddings on the card (`-ot per_layer_token_embd...=CUDA0`) | prefill +10% (pp512 764 -> 840), decode neutral; 2.7 GB VRAM | identical |
+
+Measured and rejected:
+
+* **1134 MHz memory** passes cold (36 C, 100 passes) but flips single bits warm (42 C: 17 words
+  in 100 passes, top byte lane, bits 31/28/25). **1080 MHz passes 200 passes warm** and stays the
+  default; `local-gpu`'s startup VRAM check is now 20 passes. Die temperature under sustained
+  decode: 41-43 C (shimd op 11 TEMP; `local-gpu status` shows it).
+* **Dropping the per-launch WAIT_FOR_IDLE**: with a pushbuffer semaphore, 4536/16384 pages wrong;
+  with the QMD's own RELEASE0 semaphore, the semaphore went backwards (done 16 after launch 18) --
+  grids from one channel are not serialized on GP102 without the WFI. Stream order without it
+  needs dependent-QMD chaining (`DEPENDENT_QMD_*` fields). Ceiling ~5-7% of decode.
+* CUDA graphs: llama.cpp disables them before Ampere.
+
+Where the host time goes (`SHIMD_OPSTAT=1`): pure host cost ~13.6 us per launch; the GPU is
+idle on the host only once per token (535 of 619k launches found an empty queue); ~30 syncs and
+~12 host->device copies per token at the token boundary. Decode is GPU-bound (~86%).
+
+Research (docs/reference/README.md): the GDDR5X datasheet puts the DRAM's own DDR-mode
+(PLL-off) ceiling at f_CK 1375 MHz (5.5 Gb/s/pin) -- we run 540 MHz (2.2 Gb/s), so the 1188+ MHz
+failures are controller-side. NVIDIA's nvgpu shows the Pascal GPC clock is an FLL programmed,
+with the voltage PWM, by PMU firmware -- the hard path. The gpu-unlock repos unlock tensor-core
+rates on Turing/Ampere/Ada and do not apply to GP102.

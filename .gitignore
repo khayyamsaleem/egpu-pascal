@@ -20,3 +20,5 @@ shim/build/
 shim/captured/
 shim/build-cuda12/
 shim/cudart/fbtest.cu
+# downloaded datasheets / vendor docs (local copies; see docs/reference/README.md for sources)
+docs/reference/files/

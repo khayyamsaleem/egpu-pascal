@@ -6,6 +6,7 @@ Owns one nvpascal.Device and serves a tiny binary protocol over TCP:
   status 0 = ok, otherwise a CUresult the shim returns to its caller.
 
   op 1 INFO                      -> <u64 free> <u64 total> <u32 sm_count> <u32 sm_khz> <u32 mem_khz>
+  op 11 TEMP                     -> <i32 die temperature C, -1 if the sensor is not valid> <u32 raw 0x020460>
   op 2 ALLOC   <u64 size>        -> <u64 va>
   op 3 FREE    <u64 va>
   op 4 HTOD    <u64 va> data
@@ -59,6 +60,17 @@ class Server:
         self.mark = self.dev.module_mark()   # code/module-data watermark after the builtin kernels
         self.active = 0                      # open client connections
         self.lock = threading.Lock()          # one GPU, one op at a time (each shim .so has its own socket)
+        self.opstat = {}                      # SHIMD_OPSTAT=1: op -> [count, handler s, wait s, bytes in, bytes out]
+        self.gpu_wait = [0, 0.0, 0]           # SHIMD_OPSTAT=1: time the handlers spent blocked on the GPU
+        if OPSTAT:
+            ws, gw = self.dev.wait_seq, self.gpu_wait
+            def timed_wait(seq, *a, **kw):
+                t = time.perf_counter()
+                try:
+                    return ws(seq, *a, **kw)
+                finally:
+                    gw[0] += 1; gw[1] += time.perf_counter() - t
+            self.dev.wait_seq = timed_wait
         print("shimd: GP102 up in %.1f s; VRAM limit %.1f GiB" % (time.time() - t0, limit / 2**30), flush=True)
 
     def mem_khz(self):
@@ -176,6 +188,8 @@ class Server:
                            if nvpascal.DATA_VA0 <= v < nvpascal.DATA_VA0 + (16 << 30)})
             print("T launch %s grid %d,%d,%d ptrs %s" % (k["name"][:48], gx, gy, gz,
                   " ".join("%x" % v for v in ptrs)), flush=True)
+        if OPSTAT and self.dev.done_seq() == self.dev.hseq:
+            self.gpu_wait[2] += 1                   # the GPU had nothing queued: it was idle on us
         self.dev.launch_async(k, (gx, gy, gz), (bx, by, bz), params, smem=smem)
         return b""
 
@@ -183,7 +197,26 @@ class Server:
         self.dev.drain()
         return b""
 
+    def temp(self, p):
+        """op 11: die temperature (BAR0 0x020460, nouveau gp100_temp_get) -> <i32 C or -1> <u32 raw>."""
+        raw = self.dev.c.rd(0x020460)
+        return struct.pack("<iI", (raw & 0x0001FFF8) >> 8 if raw & 0x20000000 else -1, raw)
+
+    def opstat_report(self):
+        if not OPSTAT or not self.opstat:
+            return
+        print("shimd: host time by op (SHIMD_OPSTAT): count, handler ms, waiting-for-client ms, bytes in/out;"
+              " of the handler time, %.1f ms (%d calls) was blocked on the GPU (wait_seq);"
+              " %d launches found the GPU idle (empty queue)"
+              % (self.gpu_wait[1] * 1e3, self.gpu_wait[0], self.gpu_wait[2] if len(self.gpu_wait) > 2 else 0),
+              flush=True)
+        for op, (n, h, w, bi, bo) in sorted(self.opstat.items(), key=lambda kv: -kv[1][1]):
+            print("  %-7s %8d  handler %9.1f ms (%6.1f us each)  wait %9.1f ms  in %8.1f MB  out %8.1f MB"
+                  % (self.OPS[op], n, h * 1e3, h / n * 1e6, w * 1e3, bi / 1e6, bo / 1e6), flush=True)
+        self.opstat.clear(); self.gpu_wait[:] = [0, 0.0, 0]
+
     def prof(self):
+        self.opstat_report()
         if not self.dev.prof:
             return
         tot = sum(v[1] for v in self.dev.prof.values())
@@ -193,7 +226,7 @@ class Server:
         self.dev.prof.clear()
 
     OPS = {1: "info", 2: "alloc", 3: "free", 4: "htod", 5: "dtoh", 6: "dtod", 7: "memset", 8: "module", 9: "launch",
-           10: "sync"}
+           10: "sync", 11: "temp"}
     NOREPLY = 0x80000000
 
     def serve(self, port):
@@ -248,15 +281,23 @@ class Server:
                 b += ch
             return bytes(b)
         sticky = 0                                   # first failure of a no-reply op
+        st = self.opstat if OPSTAT else None
         while True:
+            t0 = time.perf_counter() if st is not None else 0
             op, ln = struct.unpack("<II", recvn(8))
             payload = recvn(ln) if ln else b""
             noreply, op = op & self.NOREPLY, op & ~self.NOREPLY
             status, out = 0, b""
+            if st is not None:
+                t1 = time.perf_counter()
             try:
                 with self.lock:
                     fn = getattr(self, self.OPS[op])
                     out = fn(payload, owned) if op in (2, 3) else fn(payload)
+                if st is not None:
+                    t2 = time.perf_counter()
+                    e = st.setdefault(op, [0, 0.0, 0.0, 0, 0])
+                    e[0] += 1; e[1] += t2 - t1; e[2] += t1 - t0; e[3] += ln; e[4] += len(out)
             except Cu as e:
                 status = e.code
             except KeyError as e:
@@ -269,6 +310,9 @@ class Server:
             if sticky and not status:
                 status, out, sticky = sticky, b"", 0
             conn.sendall(struct.pack("<iI", status, len(out)) + out)
+
+
+OPSTAT = bool(os.environ.get("SHIMD_OPSTAT"))
 
 
 class Cu(Exception):

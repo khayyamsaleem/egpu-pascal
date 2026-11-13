@@ -42,7 +42,24 @@ of ~74 ms -> GPU-bound.  Weight matvecs 55-68 GB/s of 87 available; ~900 launche
 per token, small kernels 13-20 us each at the 607 MHz SM clock; ~10 ms/token is
 host launch overhead (900 x ~12 us).  lm_head (Q6_K, 550 MB) is 8 ms/token.
 
-OPEN TASKS, RE-RANKED FOR TOK/S (supersedes section 4's ranking):
+SESSION 12 (same night, low-risk round; RESULTS.md section 11, docs/reference/README.md):
+  E4B bench 159 -> 153 s, 14.0 tok/s decode, 401 tok/s prefill, from llama.cpp defaults now in
+  local-gpu (-bs, --spec-type ngram-mod, E4B embeddings on the card; LOCAL_GPU_PLAIN=1 = off).
+  1134 MHz flips bits warm -> 1080 stays. Dropping WFI breaks stream order (grids overlap).
+  shimd op 11 TEMP; SHIMD_OPSTAT=1 per-op host timing; --llama-args / LOCAL_GPU_LLAMA_ARGS.
+  New ranking below: memory headroom (DDR mode up to f_CK 1375 per the datasheet) first.
+
+OPEN TASKS, RE-RANKED FOR TOK/S (supersedes section 4's ranking and the list right below):
+  A. Memory beyond 1134 MHz in DDR mode: the DRAM allows f_CK 1375 (WCK 2750 = our "mclk"),
+     ~2.5x today. The limit is the controller: bank-1 PHY values top out ~1134; band 2
+     (1300..3350, bank 2, timing 2) does not train at 1620 on the refpll. Needs the GDDR5X
+     mode registers (JEDEC JESD232) and the band-2 training command semantics. Risk: card
+     resets (cold path recovers), no voltage change.
+  B. Dependent-QMD chaining to drop the per-launch WFI (~5-7%).
+  C. SM clock via the FLL (NAFLL) + voltage: what NVIDIA's PMU firmware does; hard, and a
+     voltage write needs the user's explicit OK.
+
+(previous ranking, kept for reference:)
   1. SM clock (607 MHz; spec 1480/1582).  Read-only so far: the Kepler GPCPLL at
      0x137000 reads badf on GP102 -> the GPC clock is elsewhere (probably NAFLL);
      NVVDD PWM 0x20340 = 0xa0 period, 0x20344 = 0x40 duty.  A GPC reclock may need a
