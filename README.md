@@ -94,6 +94,33 @@ c = dev.alloc_host(4096 * 4)                    # Mac memory through the IOMMU
 ns = dev.launch(k, (32, 1, 1), (128, 1, 1), struct.pack("<QQQI", a.va, b.va, c.va, 4096))
 ```
 
+## Chat and the tool harness
+
+`local-gpu chat` (or `bin/gpu-chat` for a new window) talks to the local endpoint; adding
+`--tools` gives it the tool harness. Tools are a registry grouped into bundles, and **only the
+active ones go into a request** -- the default is one tool wide (`use_tools`) and grows on demand:
+
+| bundle | tools | loads when |
+|---|---|---|
+| `web` | `web_search` (your own SearXNG first, then keyless fallbacks), `fetch_url` | search / latest / url / news |
+| `repo` | `list_files`, `read_file`, `grep_repo`, `git_cmd` (read-only git) | grep / git / diff / file / repo |
+| `compute` | `calc` (AST-checked arithmetic, no side effects) | how many / calculate / percent |
+| `edit` | `write_file`, `run_command`, `python` | **never automatically**, and each call asks first |
+| `memory` | `remember`, `recall` (notes in `~/.local/state/local-gpu/chat-notes.md`) | remember / recall |
+| `time` | `now` | what time / the date |
+| `demo` | `get_weather` | (offline demo) |
+
+Three ways a tool gets loaded: the model calls `use_tools`, the model calls a tool that isn't
+loaded (the harness loads it and lets it retry), or you do it by hand -- `/tools` lists the registry
+and what is pinned, `/load web`, `/unload repo`, `/load all`, `/auto` toggles the keyword
+heuristic, `/yes` toggles confirmations.  `--tools=all` pins everything up front, `--tools=web,repo`
+pins just those, `--no-auto` turns the keyword heuristic off.
+
+Checked on the card (session 14): "how many seconds are in 3 days, with the calc tool" loaded
+`compute` and called `calc` -> 259200; "what is the current time" loaded `time` and called `now`;
+asking for Python loaded `edit` on demand, got the confirmation refusal, and re-ran the arithmetic
+with `calc` instead.
+
 ## Layout
 
 | Path | What |
@@ -101,7 +128,7 @@ ns = dev.launch(k, (32, 1, 1), (128, 1, 1), struct.pack("<QQQI", a.va, b.va, c.v
 | `pascal/` | the driver: `card` (BAR0/PRAMIN), `devinit`/`vbios`, `fb`, `mmu`, `acr`/`acr_unload`, `sec2_rtos`, `gr`/`gr_ctxctl`/`grctx`, `fifo`, `grchan`, `compute`, **`nvpascal`** (runtime), `cubin`, `bench`, `fecs_snap`, probes, recovery |
 | `kernels/` | PTX sources, built sm_61 cubins, `Dockerfile` + `build.sh` |
 | `shim/` | `libcuda.so.1` + `libnvidia-ml.so.1` replacements for MAX (Linux container), `cudart/` + `cublas/` for llama.cpp, and their tests |
-| `localgpu/` | `local-gpu`: card/stack bring-up, model fetch, Ollama + OpenAI proxy, terminal chat (plain, or `--tools` for a tool loop), multi-turn bench |
+| `localgpu/` | `local-gpu`: card/stack bring-up, model fetch, Ollama + OpenAI proxy, terminal chat (plain, or `--tools` for the tool harness: bundles loaded on demand), multi-turn bench |
 | `llama/` | llama.cpp build for sm_61 (`--no-compress`, no VMM, no CUDA graphs) and its container |
 | `maxpatch/` | the local MAX patches for sm_61 (and the `w8_linear` int8 custom-op kernel) + their installer |
 | `tools/nvclass`, `tools/nvkm`, `tools/mesa` | vendored references (MIT): NVIDIA class/QMD headers, nouveau, Mesa |
