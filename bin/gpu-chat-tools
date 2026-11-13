@@ -1,0 +1,6 @@
+#!/bin/sh
+# Same as bin/gpu-chat, with the model's tool loop enabled (see localgpu/chat.py).
+# Read-only tools run at once; write_file and run_command ask for confirmation (/yes turns that
+# off inside the session).  File tools are confined to the repository.
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd) || exit 1
+exec "$here/bin/gpu-chat" --tools "$@"

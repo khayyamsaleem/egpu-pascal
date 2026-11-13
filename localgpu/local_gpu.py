@@ -4,6 +4,9 @@
   local-gpu                         serve the default model (gemma4-e4b) and print the endpoints
   local-gpu serve --model llama3.1-8b [--ctx 16384]
   local-gpu chat [--model M]        terminal chat against the running server (starts it if needed)
+  local-gpu chat --tools            ... with a tool loop: get_weather, list_files, read_file,
+                                    write_file, run_command.  write/run ask before they execute
+                                    (/yes turns that off); file paths stay inside --root (REPO)
   local-gpu run M "prompt"          one-shot answer
   local-gpu status | models | pull M | logs [server|shimd|proxy] | bench [M] | stop [--all]
 
@@ -473,7 +476,9 @@ def cmd_chat(a, prompt=None):
     cur = serve(a)
     sys.path.insert(0, os.path.join(REPO, "localgpu"))
     import chat
-    chat.run("http://127.0.0.1:%d/v1" % PROXY_PORT, cur["model"], prompt=prompt, system=a.system)
+    chat.run("http://127.0.0.1:%d/v1" % PROXY_PORT, cur["model"], prompt=prompt, system=a.system,
+             tools=getattr(a, "tools", False), yes=getattr(a, "yes", False),
+             root=getattr(a, "root", None) or REPO)
 
 
 def main():
@@ -495,8 +500,15 @@ def main():
         return p
     common(sub.add_parser("serve", help="start serving (default command)"))
     p = common(sub.add_parser("chat", help="interactive terminal chat")); p.add_argument("--system", default=None)
+    p.add_argument("--tools", action="store_true",
+                   help="give the model a tool loop (get_weather, list_files, read_file, write_file, run_command)")
+    p.add_argument("--yes", action="store_true", help="with --tools: skip the write/run confirmation")
+    p.add_argument("--root", default=None, help="with --tools: directory file tools are confined to")
     p = common(sub.add_parser("run", help="one-shot: local-gpu run MODEL PROMPT"), model=False)
     p.add_argument("model"); p.add_argument("prompt", nargs="*"); p.add_argument("--system", default=None)
+    p.add_argument("--tools", action="store_true", help="give the model a tool loop")
+    p.add_argument("--yes", action="store_true", help="with --tools: skip the write/run confirmation")
+    p.add_argument("--root", default=None, help="with --tools: directory file tools are confined to")
     sub.add_parser("status"); sub.add_parser("models")
     p = sub.add_parser("pull"); p.add_argument("model")
     p = sub.add_parser("stop"); p.add_argument("--all", action="store_true", help="also stop the driver server")
