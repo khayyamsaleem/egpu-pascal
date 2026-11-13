@@ -61,11 +61,10 @@ BUNDLE_KEYWORDS = {
 # not waste a round trip with them.
 SKILLS = {
     "python": (
-        "One self-contained script per call, no state between calls: print what you need back. "
-        "Helper modules go in files={'x.py': ...}. Batch deps=[...] -- each install asks the user. "
-        "Charts: matplotlib is installed, and a ready candlestick helper is in the repo: "
-        "python3 /repo/sandbox/tools/candles.py --out /work/chart.png < data.csv (takes the "
-        "stock_history CSV as-is). Use it rather than hand-rolling a candlestick."),
+        "One self-contained script per call: print what you need back, the next call starts fresh. "
+        "files={'utils.py': '...'} is written to /work and importable later. "
+        "Candlestick charts: run python3 /repo/sandbox/tools/candles.py < data.csv --out "
+        "/work/chart.png -- do not hand-roll one."),
     "sandbox": (
         "Throwaway VM: no network, 512 MB, 30 s default timeout. Only /work persists; /repo is "
         "read-only; /mnt/<tag> are folders the user shared."),
@@ -313,7 +312,14 @@ register("python", "sandbox",
          "under /mnt/. Preinstalled: numpy pandas matplotlib scipy sympy tabulate requests bs4 lxml "
          "pyyaml dateutil. For anything else pass deps=[\"pkg\"]: pip installs it into /deps, which "
          "is on PYTHONPATH and shared by every later call (that step asks first and needs network).",
-         {"code": S, "deps": {"type": "array", "items": S}, "files": {"type": "object"},
+         {"code": S,
+          "deps": {"type": "array", "items": S,
+                   "description": "pip packages to install first, into /deps for later calls "
+                                  "(this asks the user and needs network)"},
+          "files": {"type": "object",
+                    "description": "files to write into /work before the code runs, as "
+                                   "{filename: contents}; they stay there, so a later call can "
+                                   "import or read them"},
           "timeout": I, "net": {"type": "boolean"}}, ["code"])
 register("shell", "sandbox", "Run a shell command in the same sandboxed machine (sh -c)",
          {"command": S, "timeout": I, "net": {"type": "boolean"}}, ["command"])
