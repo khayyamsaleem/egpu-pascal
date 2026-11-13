@@ -13,13 +13,16 @@ Two runtimes reach it through a libcuda/NVML shim over TinyGPU:
   gives it, and 200 ms/token since launches became asynchronous (was 529).
 * **llama.cpp** (via `shim/cudart` + `shim/cublas`): SmolLM2-135M Q4_0 at 61 tok/s
   generation / 447 tok/s prompt, and `test-backend-ops` 10,000+ cases with 0 failures.
-  **Gemma 4 E4B (QAT Q4_0) at 13.5 tok/s** with tool calling.
+  **Gemma 4 E4B (QAT Q4_0) at ~13 tok/s** with tool calling — the serving path, and the one the
+  chat harness rides on. Only ~25 of those tokens-per-turn are the answer; the rest is the model's
+  thinking, which is what [Thinking is the cost](#thinking-is-the-cost-not-the-answer) is about.
 
 **The memory is reclocked** from the 405 MHz boot clock to **1080 MHz** (31 -> 87 GB/s), the
 first Pascal memory reclock by an open driver (`pascal/mclk.py`; RESULTS.md section 10). The
 VBIOS bands above 1134 MHz are out of reach on that (refpll) path — band 2 never completes DRAM
 training and the first GPU work after it hangs — so the next lever is the memory PLL the high
-bands need (RESULTS.md section 12).
+bands need (RESULTS.md section 12). The SM clock stays at its 607 MHz boot value: the FLL route
+needs a voltage change, which needs an explicit OK first.
 
 [`bin/local-gpu`](localgpu/) brings the whole stack up with one command: card init if it is
 cold, the driver server, the right container, a resumable model download, an Ollama-compatible
@@ -32,10 +35,12 @@ rung 1  our microcode on a falcon                         DONE
 rung 2  ACR secure boot, FECS/GPCCS running               DONE
 rung 3  MMU v2 + GPFIFO channel + copy engine             DONE
 rung 4  compute dispatch: sm_61 vadd -> host memory        DONE
-rung 5  model inference: MAX (SmolLM2, Gemma 4 E2B), llama.cpp    DONE (quantized weights next)
+rung 5  model inference: llama.cpp (QAT 4-bit, tool calling), MAX (SmolLM2, Gemma 4 E2B)   DONE
 ```
 
-Boot clocks only for now: 607 MHz SM, 405 MHz memory (~30 GB/s measured).
+**llama.cpp is the serving path**, on quantized weights; MAX stays for what only it can do (bf16
+checkpoints) and as the thing that exercised the libcuda shim hardest — its decode is ~4-5 tok/s
+against llama.cpp's ~13, because it has no int4 path for Pascal and GP102 has no tensor cores.
 
 ## Requirements
 
@@ -46,6 +51,9 @@ Boot clocks only for now: 607 MHz SM, 405 MHz memory (~30 GB/s measured).
 * firmware: `firmware/fetch.sh` (NVIDIA signed blobs from linux-firmware) and
   `pascal/dump_vbios.py` (this card's VBIOS); see [firmware/README.md](firmware/README.md)
 * kernels: Docker (OrbStack works) for CUDA 12.4 `ptxas` via `kernels/build.sh`
+* optional: [hvi](https://github.com/brig-sh/hvi-vmm) for the code sandbox (a signed release binary
+  in `~/.local/bin/hvi` plus the guest image — `bin/local-gpu sandbox --status` says what is
+  missing); without it the sandbox falls back to Docker
 * optional: [envytools](https://github.com/envytools/envytools) cloned and built in
   `tools/envytools` (falcon/SASS disassembly, rnndb)
 
@@ -68,6 +76,10 @@ Other gates: `pascal/mmu.py --selftest` (offline), `pascal/mmu_test.py` (RT-2, 1
 `pascal/test_modules.py` (CUDA-module ABI: local memory, globals, constant banks, 5000-launch wrap).
 
 ## Run an LLM with MAX
+
+MAX is the alternative runtime, not the serving path (see the note above rung 5) — it is here
+because it is what proved the libcuda shim against a real framework, and because it is the only way
+to run the bf16 checkpoints llama.cpp's 4-bit paths do not cover.
 
 ```sh
 # Mac: card up (above), then the driver server
@@ -104,7 +116,7 @@ active ones go into a request** -- the default is one tool wide (`use_tools`) an
 |---|---|---|
 | `web` | `web_search` (your own SearXNG first, then keyless fallbacks), `fetch_url` | search / latest / url / news |
 | `repo` | `list_files`, `read_file`, `grep_repo`, `git_cmd` (read-only git) | grep / git / diff / file / repo |
-| `market` | `stock_quote` (Nasdaq for US tickers, Yahoo for foreign/index, CoinGecko for crypto), `fx_rate` (ECB) | stock / ticker / trading at / exchange rate |
+| `market` | `stock_quote` (live, or a past date/time via `when=`; Nasdaq/Yahoo/CoinGecko), `fx_rate` (ECB) | stock / ticker / trading at / exchange rate |
 | `compute` | `calc` (AST-checked arithmetic, no side effects) | how many / calculate / percent |
 | `sandbox` | `python`, `shell` (run in an hvi microVM or a locked-down container) | python / script / pandas / plot / parse / unit test |
 | `edit` | `write_file`, `run_command` (ON THE HOST) | **never automatically**, and each call asks first |
@@ -136,6 +148,23 @@ company name, market cap and 52-week range), Yahoo's keyless chart endpoint for 
 and indices, CoinGecko for crypto pairs.  One measured gotcha worth keeping: Yahoo's edge returns
 **429 to a full browser User-Agent but 200 to a plain `Mozilla/5.0`**, same request -- the finance
 fetches therefore send the short one.
+
+`stock_quote` also takes `when` for a **historical** price instead of the live one:
+
+| `when` | what comes back |
+|---|---|
+| `"2026-11-10"` | that session's OHLC and close (interval `1d`) |
+| `"2026-11-10 14:30"` | the price **at that minute** (1m bars), times read in the exchange's own zone |
+| `"yesterday"`, `"today"` | shorthand for the above |
+
+Crypto goes to CoinGecko for this too (its history and `market_chart/range` endpoints, both
+keyless), and Nasdaq's `historical` endpoint is the second opinion for US tickers.  Two details
+worth knowing: Yahoo answers **HTTP 422** if an intraday window is too wide or too old, so the
+interval is chosen by the age of the target (1m within a week, 5m within two months, 1h within two
+years, daily beyond) and the window shrinks with it; and when the requested minute doesn't exist
+(the market was closed, or the date is a weekend) the nearest bar is returned **and labelled as
+such** rather than passed off as exact.  Verified: AAPL `2026-11-10` returns 348.51 / O 351.35 /
+H 353.87 / L 346.46 from Yahoo, matching Nasdaq's own history rows to the cent.
 
 ## Running code: the sandbox
 
@@ -219,11 +248,13 @@ Ruled out, on evidence rather than taste:
 | `kernels/` | PTX sources, built sm_61 cubins, `Dockerfile` + `build.sh` |
 | `shim/` | `libcuda.so.1` + `libnvidia-ml.so.1` replacements for MAX (Linux container), `cudart/` + `cublas/` for llama.cpp, and their tests |
 | `localgpu/` | `local-gpu`: card/stack bring-up, model fetch, Ollama + OpenAI proxy, terminal chat (plain, or `--tools` for the tool harness: bundles loaded on demand), multi-turn bench |
+| `bin/` | `local-gpu`, `gpu-chat`, `gpu-chat-tools` — the launchers, including the Ghostty window |
+| `sandbox/` | the code sandbox's image and notes ([README](sandbox/README.md)); the mechanics are `localgpu/hvi_guest.py` (guest image + virtio-fs run protocol) and `localgpu/sandbox_exec.py` (backends, mounts, deps) |
 | `llama/` | llama.cpp build for sm_61 (`--no-compress`, no VMM, no CUDA graphs) and its container |
 | `maxpatch/` | the local MAX patches for sm_61 (and the `w8_linear` int8 custom-op kernel) + their installer |
 | `tools/nvclass`, `tools/nvkm`, `tools/mesa` | vendored references (MIT): NVIDIA class/QMD headers, nouveau, Mesa |
 | `docs/` | the chronological evidence trail and per-session handoffs |
-| `docs/upstream/` | what was sent to Modular and tinygrad (issues, draft PRs, the exact diffs) and why the rest stays local |
+| `docs/upstream/`, `upstream/` | what was sent to Modular and tinygrad (issues, draft PRs, the exact diffs) and why the rest stays local; `upstream/` is the early MAX/GPU work |
 | `logs/` | hardware output cited by RESULTS.md and the docs |
 | `probes/phase0/` | the first read-only probes and RT-0/RT-1 microcode tests |
 | `PLAN.md` | the plan of record (phases, routes, odds) |

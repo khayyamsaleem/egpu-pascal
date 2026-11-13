@@ -14,7 +14,8 @@ and every call in it asks first unless `--yes`.  `--tools` turns the harness on 
 loading only), `--tools=web,repo` pins those bundles, `--tools=all` pins everything; `/load` and
 `/unload` do the same inside the session.  File paths are confined to `--root`.
 """
-import ast, datetime, html, json, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import ast, calendar, datetime, html, json, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+from typing import Any
 
 DIM, RESET = ("\033[2m", "\033[0m") if sys.stdout.isatty() else ("", "")
 MAX_ITER = 8                                   # tool round trips per turn
@@ -258,8 +259,10 @@ register("calc", "compute", "Evaluate an arithmetic expression exactly (no side 
 # market
 register("stock_quote", "market",
          "Quote(s) for stocks, ETFs, indices and crypto: price, change, day range, volume. "
-         "Symbols like AAPL, MSFT, NVDA, 7203.T, ^GSPC, BTC-USD",
-         {"symbols": S, "detail": {"type": "boolean"}}, ["symbols"])
+         "Symbols like AAPL, MSFT, NVDA, 7203.T, ^GSPC, BTC-USD. Give `when` for a historical "
+         "price instead of the live one: \"2026-11-10\" for that day's close, or \"2026-11-10 "
+         "14:30\" for the price at that minute (exchange time).",
+         {"symbols": S, "detail": {"type": "boolean"}, "when": S}, ["symbols"])
 register("fx_rate", "market", "Exchange rates (ECB, via frankfurter.dev)",
          {"base": S, "to": S}, [])
 # sandbox: code runs in a VM of its own (hvi microVM) or a locked-down container (localgpu/sandbox_exec.py)
@@ -543,7 +546,178 @@ def _coingecko_quote(sym, detail=False):
                                          (" (%+.2f%% 24h)" % chg) if chg is not None else "")
 
 
-def stock_quote(symbols="", detail=False):
+def _parse_when(when):
+    """'' -> None (live).  'YYYY-MM-DD' -> a daily bar.  'YYYY-MM-DD HH:MM' -> that minute.
+    'today'/'yesterday' are taken on the host's clock (which is US Eastern, like the market)."""
+    s = str(when or "").strip()
+    if not s:
+        return None
+    low = s.lower()
+    today = datetime.date.today()
+    if low in ("today", "now"):
+        return ("%s" % today.isoformat(), False, None)
+    if low == "yesterday":
+        return ((today - datetime.timedelta(days=1)).isoformat(), False, None)
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2}))?$", s)
+    if not m:
+        raise ValueError("use YYYY-MM-DD or 'YYYY-MM-DD HH:MM' (or today/yesterday)")
+    y, mo, d, hh, mi = m.groups()
+    date_s = "%s-%02d-%02d" % (y, int(mo), int(d))
+    return (date_s, bool(hh), (int(hh), int(mi)) if hh else None)
+
+
+def _at(ts_list, off, date_s, hhmm):
+    """Pick the bar to report: the one at that minute, else the last bar of that local day."""
+    want_day = date_s
+    bars = [(t, datetime.datetime.utcfromtimestamp(t + off)) for t in ts_list]
+    if hhmm:
+        h, mi = hhmm
+        epoch = calendar.timegm(datetime.datetime.strptime(date_s, "%Y-%m-%d").timetuple()) \
+            + h * 3600 + mi * 60 - off
+        nearest = min(ts_list, key=lambda t: abs(t - epoch)) if ts_list else None
+        return nearest, datetime.datetime.utcfromtimestamp(nearest + off) if nearest else None, \
+            (nearest == epoch)
+    same = [t for t, local in bars if local.date().isoformat() == want_day]
+    if same:
+        last = same[-1]
+        return last, datetime.datetime.utcfromtimestamp(last + off), False
+    return None, None, False
+
+
+def _when_label(when):
+    date_s, has_time, hhmm = when
+    return "%s %02d:%02d" % (date_s, hhmm[0], hhmm[1]) if has_time else date_s
+
+
+def _yahoo_at(sym, when):
+    """A historical bar from Yahoo's keyless chart endpoint (1m bars for a time, 1d for a date).
+
+    Yahoo refuses an intraday request whose window is too wide (HTTP 422) and only keeps fine
+    granularity for recent periods, so both the interval and the window are chosen by the age of
+    the target: 1m/2 days inside a week, 5m/10 days inside two months, 1h/30 days inside two years,
+    daily beyond that.
+    """
+    date_s, has_time, hhmm = when
+    d0 = datetime.datetime.strptime(date_s, "%Y-%m-%d")
+    age = (datetime.datetime.now() - d0).days
+    if not has_time:
+        iv, span = "1d", 5
+    elif age <= 7:
+        iv, span = "1m", 1
+    elif age <= 55:
+        iv, span = "5m", 5
+    elif age <= 700:
+        iv, span = "60m", 15
+    else:
+        iv, span = "1d", 5
+    p1 = calendar.timegm((d0 - datetime.timedelta(days=span)).timetuple())
+    p2 = calendar.timegm((d0 + datetime.timedelta(days=span)).timetuple())
+    url = ("https://%s.finance.yahoo.com/v8/finance/chart/%s?period1=%d&period2=%d&interval=%s"
+           "&includePrePost=false")
+    last = None
+    for host in ("query1", "query2"):
+        try:
+            j = json.loads(_get(url % (host, urllib.parse.quote(str(sym)), p1, p2, iv),
+                                headers={"User-Agent": UA_MIN}))
+            last = j
+            break
+        except Exception as e:
+            last = e
+    if not isinstance(last, dict):
+        raise RuntimeError("yahoo: %s" % last)
+    chart = last.get("chart") or {}
+    res = chart.get("result") or []
+    if chart.get("error") or not res:
+        raise RuntimeError((chart.get("error") or {}).get("description") or "no data")
+    r = res[0]
+    m = r.get("meta") or {}
+    off = m.get("gmtoffset")
+    off = -18000 if off is None else int(off)
+    ts = r.get("timestamp") or []
+    q = ((r.get("indicators") or {}).get("quote") or [{}])[0]
+    if not ts:
+        raise RuntimeError("no bars in that window (market closed, or a holiday)")
+    t, local, exact = _at(ts, off, date_s, hhmm)
+    if t is None or local is None:
+        raise RuntimeError("no trading day near %s" % date_s)
+    i = ts.index(t)
+    close = (q.get("close") or [None])[i]
+    cur = m.get("currency") or ""
+    bits = ["%s %s %s" % (m.get("symbol") or sym, _num(close), cur)]
+    if has_time:
+        bits.append("at %s %s" % (local.strftime("%Y-%m-%d %H:%M"),
+                                  m.get("exchangeTimezoneName") or "exchange time"))
+    else:
+        bits.append("session %s" % local.date().isoformat())   # a daily bar has a date, not a time
+    bits.append("%s bar" % iv)
+    if not exact and has_time:
+        bits.append("NEAREST bar, not an exact %s hit" % _when_label(when))
+    if not has_time:
+        for k, lab in (("open", "open"), ("high", "high"), ("low", "low")):
+            v = (q.get(k) or [None])[i]
+            if v is not None:
+                bits.append("%s %s" % (lab, _num(v)))
+    if q.get("volume") and q["volume"][i]:
+        bits.append("vol %s" % _num(q["volume"][i], 0))
+    return "[yahoo] " + ", ".join(b for b in bits if b)
+
+
+def _nasdaq_at(sym, when):
+    """Daily history from api.nasdaq.com (keyless, US listings, no intraday)."""
+    date_s, has_time, _hhmm = when
+    d0 = datetime.datetime.strptime(date_s, "%Y-%m-%d")
+    frm = (d0 - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+    to = (d0 + datetime.timedelta(days=3)).strftime("%Y-%m-%d")
+    j = json.loads(_get("https://api.nasdaq.com/api/quote/%s/historical?assetclass=stocks"
+                        "&fromdate=%s&todate=%s&limit=30" % (urllib.parse.quote(str(sym)), frm, to),
+                        headers={"Accept": "application/json"}))
+    rows = (((j.get("data") or {}).get("tradesTable") or {}).get("rows")) or []
+    if not rows:
+        raise RuntimeError("no rows (US listings only)")
+    want = d0.strftime("%m/%d/%Y")
+    row = next((x for x in rows if x.get("date") == want), None)
+    extra = ""
+    if row is None:
+        row = min(rows, key=lambda x: abs((datetime.datetime.strptime(x["date"], "%m/%d/%Y") - d0).days))
+        extra = ", NEAREST trading day"
+    bits = ["%s %s" % (sym, row.get("close") or "?"), "on %s" % row.get("date"),
+            "open %s" % row.get("open"), "high %s" % row.get("high"), "low %s" % row.get("low"),
+            "vol %s" % row.get("volume")]
+    if has_time:
+        extra += ", daily close only (this source has no intraday)"
+    return "[nasdaq] " + ", ".join(b for b in bits if b and b.strip()) + extra
+
+
+def _coingecko_at(sym, when):
+    """Crypto at a date (CoinGecko history) or a minute (its keyless market_chart/range)."""
+    base = re.split(r"[-/]", str(sym))[0]
+    cid = COINGECKO.get(base)
+    if not cid:
+        raise RuntimeError("no CoinGecko id for %s" % base)
+    date_s, has_time, hhmm = when
+    if not has_time:
+        dd, mm, yy = date_s.split("-")[2], date_s.split("-")[1], date_s.split("-")[0]
+        d = (json.loads(_get("https://api.coingecko.com/api/v3/coins/%s/history?date=%s-%s-%s"
+                             "&localization=false" % (cid, dd, mm, yy))) or {})
+        usd = ((d.get("market_data") or {}).get("current_price") or {}).get("usd")
+        if not usd:
+            raise RuntimeError("no price for that date")
+        return "[coingecko] %s $%s USD on %s" % (sym, _num(usd), date_s)
+    off = -18000                                   # report in US Eastern, like the equity path
+    epoch = calendar.timegm(datetime.datetime.strptime(date_s, "%Y-%m-%d").timetuple()) \
+        + hhmm[0] * 3600 + hhmm[1] * 60 - off
+    d = json.loads(_get("https://api.coingecko.com/api/v3/coins/%s/market_chart/range?vs_currency=usd"
+                        "&from=%d&to=%d" % (cid, epoch - 900, epoch + 900)))
+    pts = d.get("prices") or []
+    if not pts:
+        raise RuntimeError("no intraday points (CoinGecko keeps about a day of minute data)")
+    t, p = min(pts, key=lambda x: abs(x[0] / 1000.0 - epoch))
+    local = datetime.datetime.utcfromtimestamp(t / 1000.0 + off)
+    return "[coingecko] %s $%s USD at %s (US Eastern, UTC-05:00), nearest minute point" % (
+        sym, _num(p), local.strftime("%Y-%m-%d %H:%M"))
+
+
+def stock_quote(symbols="", detail=False, when=None):
     """Quotes for one or more symbols (AAPL, MSFT, 7203.T, BTC-USD ...).
 
     A plain US ticker goes to Nasdaq first (no rate limit, and it carries the company name, market
@@ -554,9 +728,16 @@ def stock_quote(symbols="", detail=False):
     syms = [s for s in re.split(r"[,\s]+", str(symbols).upper()) if s][:8]
     if not syms:
         return "no symbol given -- try AAPL, MSFT, NVDA, 7203.T, ^GSPC, BTC-USD"
+    try:
+        w = _parse_when(when)
+    except ValueError as e:
+        return "bad date: %s" % e
     out = []
     for s in syms:
-        if CRYPTO_PAIR.fullmatch(s):
+        if w is not None:                       # historical: Yahoo has intraday and the world;
+            order = (_coingecko_at, _yahoo_at, _nasdaq_at) if CRYPTO_PAIR.fullmatch(s) \
+                else (_yahoo_at, _nasdaq_at)    # CoinGecko is the crypto-native source
+        elif CRYPTO_PAIR.fullmatch(s):
             order = (_coingecko_quote, _yahoo_quote)
         elif re.fullmatch(r"[A-Z]{1,5}", s):
             order = (_nasdaq_quote, _yahoo_quote)
@@ -565,12 +746,14 @@ def stock_quote(symbols="", detail=False):
         why = []
         for fn in order:
             try:
-                out.append(fn(s, detail))
+                arg: Any = detail if w is None else w
+                out.append(fn(s, arg))
                 break
             except Exception as e:
                 why.append("%s: %s" % (fn.__name__.strip("_").split("_")[0], e))
         else:
-            out.append("%s: no quote (%s)" % (s, "; ".join(why)))
+            out.append("%s: no quote for %s (%s)" % (s, _when_label(w) if w else "now",
+                                                     "; ".join(why)))
     return "\n".join(out)
 
 
@@ -746,7 +929,8 @@ def call_tool(name, args, ctx):
             return grep_repo(args.get("pattern", ""), root, args.get("path") or ".",
                              args.get("glob"), int(args.get("max_hits") or 40))
         if name == "stock_quote":
-            return stock_quote(args.get("symbols", ""), bool(args.get("detail")))
+            return stock_quote(args.get("symbols", ""), bool(args.get("detail")),
+                               args.get("when"))
         if name == "fx_rate":
             return fx_rate(args.get("base", "USD"), args.get("to", ""))
         p = _under(root, args.get("path"))
