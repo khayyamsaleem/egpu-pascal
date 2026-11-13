@@ -69,6 +69,12 @@ that answers.
   * In one-shot `-q` mode `execute_code` and `-c`-flagged shell commands are refused for lack of
     an approver; the model routes around them and still answers, but interactive is the honest
     shape for real work.
+  * **The default model changed.** E2B is now `DEFAULT` in `localgpu/local_gpu.py` and what the
+    `local` alias resolves to in `~/.hermes/config.yaml` (`local-e4b` keeps E4B). It decoded 1.46x
+    faster than E4B on the same harness, and it replayed an eight-turn E4B Hermes session 2.1x
+    faster while inventing fewer details -- but E4B is still the stronger model when the answer has
+    to come from reading source, so it is one flag away. The serve default and the alias have to
+    move together: the proxy rewrites every request's model name to whatever is being served.
 
 WHAT SESSION 15 SETTLED — three levers, each closed by measurement so nobody re-opens them on
 intuition:

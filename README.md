@@ -14,9 +14,11 @@ Two runtimes reach it through a libcuda/NVML shim over TinyGPU:
   0004) take that to 13.4 tok/s decode / 37.7 tok/s prefill with byte-identical text.
 * **llama.cpp** (via `shim/cudart` + `shim/cublas`): SmolLM2-135M Q4_0 at 61 tok/s
   generation / 447 tok/s prompt, and `test-backend-ops` 20,290 cases with 0 failures.
-  **Gemma 4 E4B (QAT Q4_0) at ~13 tok/s** with tool calling and its vision projector — the
-  serving path, and the one the chat harness and Hermes ride on. Only ~25 of those tokens-per-turn
-  are the answer; the rest is the model's thinking, which is what
+  **Gemma 4 E2B (QAT Q4_0) is the default model** — 17.98 tok/s decode and 1156 tok/s prefill,
+  1.46x E4B on the same card (section 18) — and **Gemma 4 E4B** stays one flag away
+  (`local-gpu serve -m gemma4-e4b`) as the stronger model for work that has to read source. Both
+  serve with a vision projector and tool calling. Only ~25 of E4B's tokens-per-turn are the answer;
+  the rest is its thinking, which is what
   [Thinking is the cost](#thinking-is-the-cost-not-the-answer) is about.
 
 **The memory is reclocked** from the 405 MHz boot clock to **1080 MHz** (31 -> 87 GB/s), the
@@ -45,14 +47,17 @@ rung 4  compute dispatch: sm_61 vadd -> host memory        DONE
 rung 5  model inference: llama.cpp (QAT 4-bit, tool calling), MAX (SmolLM2, Gemma 4 E2B)   DONE
 ```
 
-**llama.cpp is the serving path**, on quantized weights; MAX stays for what only it can do (bf16
-checkpoints) and as the thing that exercised the libcuda shim hardest — it has no int4 path for
-Pascal (GP102 has no tensor cores), so it pays more weight bytes per token. On the one model both
-runtimes serve (Gemma 4 E2B, section 18) that is worth **1.38x on decode and 5x on prefill**
-against MAX's int8 weights, and 1.87x / 90x against bf16 — but the reason is the quantization, not
-the engine: llama.cpp's QAT GGUF reads ~40% fewer bytes, while MAX actually sustains *more*
-bandwidth per second (63 GB/s int8, 92 GB/s bf16, against llama.cpp's ~50). MAX's own numbers, for
-the record: Gemma 4 E2B 9.8 tok/s bf16, 13.4 tok/s int8 (section 16).
+**llama.cpp is the serving path**, and **Gemma 4 E2B is the default model** on it — 3.35 GB of
+QAT Q4_0 weights, 17.98 tok/s decode and 1156 tok/s prefill, 1.46x E4B on the same card at a 64K
+context with 7 GiB to spare (section 18); it also completed an eight-turn Hermes investigation
+E4B had run, 2.1x faster, with fewer invented details. E4B remains the stronger model for work
+that has to read source rather than look things up, so it is one flag away
+(`local-gpu serve -m gemma4-e4b`). MAX stays for what only it can do (bf16 checkpoints) and as the
+thing that exercised the libcuda shim hardest — it has no int4 path for Pascal (GP102 has no tensor
+cores), so it pays more weight bytes per token: 1.38x on decode and 5x on prefill against MAX's
+int8 weights on the same E2B, and 1.87x / 90x against bf16. The reason is the quantization, not the
+engine: llama.cpp's QAT GGUF reads ~40% fewer bytes, while MAX actually sustains *more* bandwidth
+per second (63 GB/s int8, 92 GB/s bf16, against llama.cpp's ~50).
 
 ## Requirements
 
@@ -185,9 +190,11 @@ question wants -- seven `stock_quote` calls would be seven round trips for the s
 
 ## Images, Hermes, and unplugging
 
-**Images.** `gemma4-e4b` is served with its vision projector, so the OpenAI endpoint takes
-`image_url` content parts (132 prompt tokens per image). `LOCAL_GPU_NO_VISION=1` serves text-only
-and frees ~1 GiB of VRAM. The model reads images; it does not produce them.
+**Images.** Both llama.cpp models serve with their vision projector, so the OpenAI endpoint takes
+`image_url` content parts (132 prompt tokens per image); E2B's is 0.99 GB, E4B's 0.95 GB.
+`LOCAL_GPU_NO_VISION=1` serves text-only and frees that back. The model reads images; it does not
+produce them. (Verified on E4B against a no-image control; on E2B the projector loads and the
+endpoint accepts images, and its reading has not been put through the same control yet.)
 
 **Hermes Agent** (CLI, TUI and the desktop app share one config). Add to `~/.hermes/config.yaml`:
 
@@ -198,19 +205,27 @@ providers:
     api_key: local-gpu
     discover_models: false
     models:
+      gemma4-e2b:            # the primary local model
+        context_length: 65536
       gemma4-e4b:
         context_length: 65536
 model_aliases:
-  local:
+  local:                     # -m local   -> E2B, the default on the card
+    model: gemma4-e2b
+    provider: local-gpu
+  local-e4b:                 # -m local-e4b -> the stronger model
     model: gemma4-e4b
     provider: local-gpu
 ```
 
-Then `local-gpu serve` and `hermes chat -m local`, `/model local` in a running session, or pick
-**local-gpu / gemma4-e4b** in the model picker. Hermes needs a 64K context, which is why 65,536 is
-the default for this model. Its default prompt is ~13.9K tokens (~10.4K of that JSON tool
-schemas), which the card prefills at ~560 tok/s: ~25 s of prompt processing, ~35 s to the first
-token on a cold server (RESULTS.md section 17); later turns reuse the cache.
+Then `local-gpu serve` and `hermes chat -m local` (`-m local-e4b` for E4B), `/model local` in a
+running session, or pick **local-gpu / gemma4-e2b** in the model picker. Hermes needs a 64K
+context, which is why 65,536 is the default for both models. The alias and the *served* model have
+to agree: the proxy rewrites every request's model name to whatever `serve` started, so
+`-m local-e4b` against a server started on E2B silently answers from E2B. The default prompt is
+~13.9K tokens (~10.4K of that JSON tool schemas), which the card prefills at ~560-1280 tok/s:
+~5-25 s of prompt processing depending on the model, ~35 s to the first token on a cold server
+(RESULTS.md sections 17-18); later turns reuse the cache.
 
 Use **`bin/hermes-local`** rather than bare `hermes chat -m local`: it checks the endpoint and then
 launches the same session with a four-tool surface (`file,terminal,code_execution,web`), which is

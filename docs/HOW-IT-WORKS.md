@@ -83,7 +83,8 @@ One command, and it skips anything already up:
    device lock exclusively and keeps the Mac awake.
 2. **the container** — `llamacpp` (or `maxnightly` for `*-max` models), started with
    `-p 127.0.0.1:8080:8080`; Docker is started first if the daemon is down.
-3. **the model** — downloaded once, resumably, into the container's `/models` volume.
+3. **the model** — the default is now Gemma 4 E2B (`local-gpu serve -m gemma4-e4b` serves the
+   stronger E4B), downloaded once, resumably, into the container's `/models` volume.
 4. **the server** — `llama-server` with all layers on the GPU (`-ngl 99 -fa on`, `--jinja`).
 5. **the proxy** — `localgpu/ollama_proxy.py` on `127.0.0.1:11434`, so Ollama clients hit
    `/api/*` and OpenAI clients hit `/v1/*` against one address.

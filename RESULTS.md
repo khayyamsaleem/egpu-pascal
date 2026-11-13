@@ -1012,3 +1012,38 @@ its prefill here is below the pp512 840 measured with the flag on. And E4B's *se
 context, n-gram speculation on) measured 13.3 tok/s on this same prompt, 8% above the plain number
 above, while the 12-turn chat bench showed speculation buying nothing at all (section 16) -- this
 answer's repeated structure is what a draft model feeds on.
+
+### E2B as a Hermes agent: the same eight turns -- and it is now the default
+
+A real E4B Hermes session (eight turns: what is installed, what is in /Applications, the attached
+GPU's specs and how the host drives it, "use the docker containers to figure that out", research
+tinygrad/TinyGPU "and dont ssh to cherryblossom", summarize the patches in that repo, is the VRAM
+in use, does the VRAM hold the model) was replayed on E2B -- same cwd, same Hermes, one resumed
+session, `-m local`, same prompts verbatim:
+
+| # | E4B | E2B |
+|---|---|---|
+| 1 | brew + npm + pip, then invented `fd-cli`, `fd-list`, `golang` | 2 calls; every brew package and app it named is real, but no npm/pip sweep |
+| 2 | `find ... *.app`, listed 30 of the 34 entries | no tool call, reused turn 1 (the more complete list) |
+| 3 | `system_profilers` (a typo), `nvidia-smi`, **no answer from tools** -- answered from memory and named the 3090 as the attached card | loaded the `gpu-falcon-re` skill and answered GP102 / 607 MHz / shimd correctly |
+| 4 | `docker ps`, no final answer | `docker ps` + `docker inspect llamacpp`, answered (image, mounts, port 8080) |
+| 5 | two web searches, no ssh | one web search, no ssh |
+| 6 | read five real modules, grounded | search + web; claimed the project **bypasses DriverKit** -- it uses it (wrong, and it contradicts its own turn 5) |
+| 7 | "yes", VMM + test state | hedged: "implies that the VRAM is being used" |
+| 8 | "yes ... via tinygrad" (the LLMs run on llama.cpp/MAX) | "yes, llama.cpp and Modular MAX" -- correct |
+
+Wall clock, prompt to final answer, from the transcript timestamps: **E4B 833 s over the eight
+turns, E2B 397 s** -- 2.1x, and most of that gap is E4B's thinking channel. E2B also served the
+same 64K context with 7.0 GiB of VRAM free against E4B's 2.9.
+
+So E2B does the same work, and it is the better *tool chooser* on a question the workspace already
+answers (turn 3) and the more accurate summarizer of long tool output (turn 1); E4B is still the
+one to trust when the answer requires reading source (turn 6). Both invented details in turn 1 --
+E4B more.
+
+**E2B is therefore `DEFAULT` in `localgpu/local_gpu.py` and what the `local` alias resolves to in
+`~/.hermes/config.yaml`**, with E4B one flag away (`local-gpu serve -m gemma4-e4b`, alias
+`local-e4b`). The serve default and the alias have to move together: the proxy rewrites every
+request's model name to whatever is being served, so `-m local-e4b` against a server started on
+E2B silently answers from E2B. E2B's context entry is now 65536 (the Hermes floor), so reproducing
+the comparison table above needs `--ctx 8192` on both sides.

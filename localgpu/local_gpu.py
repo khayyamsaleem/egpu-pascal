@@ -49,9 +49,17 @@ SHIM_ENV = "LD_LIBRARY_PATH=/repo/shim/build-cuda12 SHIM_MODE=remote SHIM_QUIET=
 HF = "https://huggingface.co/%s/resolve/main/%s"
 
 MODELS = {
+    # The primary local model since session 17: faster than E4B on the same card (section 18) and the
+    # one that replays an E4B Hermes session correctly, at a 64K context with 7 GiB of VRAM to spare.
+    "gemma4-e2b": dict(repo="google/gemma-4-E2B-it-qat-q4_0-gguf", file="gemma-4-E2B_q4_0-it.gguf", size=3.35,
+                       family="gemma4", params="5B (E2B)", quant="Q4_0", ctx=65536,   # 64K: the floor Hermes Agent accepts, as for E4B
+                       desc="Google Gemma 4 E2B, QAT 4-bit: the default, 1.46x E4B's decode (section 18)",
+                       mmproj="gemma-4-E2B-it-mmproj.gguf", mmproj_size=0.99),
+    # E4B is the stronger model (and what section 18's cross-runtime table needed on the llama side);
+    # keep it one flag away for work that has to read source rather than look things up.
     "gemma4-e4b": dict(repo="google/gemma-4-E4B-it-qat-q4_0-gguf", file="gemma-4-E4B_q4_0-it.gguf", size=5.15,
-                       family="gemma4", params="8B (E4B)", quant="Q4_0", ctx=65536,   # 64K: the floor Hermes Agent accepts; fits with 2.9 GiB spare
-                       desc="Google Gemma 4 E4B, quantization-aware 4-bit: fast, tools, the default",
+                       family="gemma4", params="8B (E4B)", quant="Q4_0", ctx=65536,
+                       desc="Google Gemma 4 E4B, quantization-aware 4-bit: the more capable model, tools + vision",
                        # its 2.7 GB of per-layer/input embeddings on the card: +10% prompt speed (pp512 764 -> 840)
                        args="-ot per_layer_token_embd.weight=CUDA0,token_embd.weight=CUDA0",
                        # the vision projector (same repo, 0.95 GB file, ~1 GiB of VRAM): image input, 132 tokens/image
@@ -67,13 +75,9 @@ MODELS = {
                      desc="Qwen3 8B, Q4_K_M: reasoning (thinking) model, good tool use"),
     "smollm2": dict(repo="bartowski/SmolLM2-135M-Instruct-GGUF", file="SmolLM2-135M-Instruct-Q4_0.gguf", size=0.09,
                     family="llama", params="135M", quant="Q4_0", ctx=8192, desc="SmolLM2 135M: tiny, for testing"),
-    # The same-model cross-runtime pair (RESULTS.md section 18): E2B exists both as a QAT Q4_0 GGUF and as
-    # the HF checkpoint MAX loads, so this is the only model where the runtime can be held fixed while the
-    # quantization changes.  ctx 8192 matches the MAX entry so the two differ in runtime, not in cache size.
-    "gemma4-e2b": dict(repo="google/gemma-4-E2B-it-qat-q4_0-gguf", file="gemma-4-E2B_q4_0-it.gguf", size=3.35,
-                       family="gemma4", params="5B (E2B)", quant="Q4_0", ctx=8192,
-                       desc="Google Gemma 4 E2B, QAT 4-bit: the llama.cpp half of the E2B/MAX comparison",
-                       mmproj="gemma-4-E2B-it-mmproj.gguf", mmproj_size=0.99),
+    # The same-model cross-runtime pair (RESULTS.md section 18) is gemma4-e2b above: it is the one model
+    # both runtimes serve (a QAT Q4_0 GGUF here, the HF checkpoint MAX loads), so the runtime can be held
+    # fixed while the quantization changes.  Reproduce that table with --ctx 8192 on both sides.
     # MAX (Modular) runtime: Hugging Face checkpoints, bf16/fp32 only (see maxpatch/README.md)
     "gemma4-e2b-max": dict(runtime="max", hf="google/gemma-4-E2B-it", encoding="bfloat16", size=9.6, family="gemma4",
                            params="5B (E2B)", quant="BF16", ctx=8192, extra="--no-prefer-module-v3",
@@ -85,7 +89,7 @@ MODELS = {
     "smollm2-max": dict(runtime="max", hf="HuggingFaceTB/SmolLM2-135M-Instruct", encoding="float32", size=0.5,
                         family="llama", params="135M", quant="F32", ctx=8192, desc="SmolLM2 135M on Modular MAX, fp32"),
 }
-DEFAULT = "gemma4-e4b"
+DEFAULT = "gemma4-e2b"
 
 
 def say(msg):
