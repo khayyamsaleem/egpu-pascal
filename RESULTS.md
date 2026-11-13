@@ -605,3 +605,40 @@ for the 810 fallback when the target failed verification after a clock excursion
 bandwidth silently); it now cycles and retries the target once first, which is the recovery the
 notes already described by hand.
 
+## 14. Task B closed: the per-launch WAIT_FOR_IDLE cannot be dropped on GP102 (session 15)
+
+Task B -- "drop the per-launch WAIT_FOR_IDLE, ~5-7% of decode" -- is answered, and the answer is no:
+measured three ways, with the mechanism the handoff named now actually tried rather than assumed.
+
+Today's launch path is `[QMD dispatch] + WAIT_FOR_IDLE (0x0110) + a pushbuffer semaphore`, one
+doorbell per launch (`pascal/nvpascal.py` `launch_async`). WFI is what makes the completion signal
+meaningful: it drains the engine before the semaphore fires. The untried half was the QMD's own
+dependency fields, which v02_01 expresses as `DEPENDENT_QMD_SCHEDULE_ENABLE` + `DEPENDENT_QMD_TYPE=GRID`
+(that version has no `DEPENDENT_QMD_POINTER`, unlike v01_07). New tooling: `pascal/test_depchain.py`
+(a fill->copy dependency chain, modes off/none/dep/group/both, sampled verification, one mode per
+process -- a bad mode wedges the FIFO) and `compute.qmd_chain`, which builds a QMD whose RELEASE0
+semaphore is the completion signal.
+
+| mode | measured |
+|---|---|
+| off (shipping: WFI + pushbuffer semaphore) | 0/48 outputs wrong, completion counter monotonic -- ordered, as it must be |
+| none (no WFI, no dependency field, QMD RELEASE0 completion) | simple chain looks fine (0/48 wrong, 0 backwards), but on the real workload the **model load never completes** -- the release into host memory never arrives, so every wait blocks |
+| dep / both (`DEPENDENT_QMD_SCHEDULE_ENABLE` + `TYPE=GRID`) | **deadlocks the channel at the second launch** (`GP_GET` stuck at 2 with `GP_PUT` at 258), reproducible; needs `reset_engines.py` + `gr.py` to recover |
+| group (a distinct `QMD_GROUP_ID` per launch) | no effect -- identical to `none` |
+
+What that pins down: a QMD RELEASE0 aimed at host memory (`sys_coh`) never signals, so the completion
+has to come from the pushbuffer *after a drain* -- WFI stays; and the v02_01 dependency encoding does
+not mean "wait for the previous grid" on GP102, it stops the scheduler. `v01_07`'s
+`DEPENDENT_QMD_POINTER` is the only remaining candidate, and trying it means handing the hardware a
+v01_07-layout QMD -- a different experiment, for whoever wants it. Until then the ~5-7% stays on the
+table.
+
+**Instrument caveat, stated so nobody over-reads the table:** the simple chain is *blind* to this
+hazard -- it comes out correct with no ordering mechanism at all, so it can neither certify nor
+refute a chaining change. Only the real workload decides, and there it hangs. The "0/48 wrong" row is
+not evidence that chaining is safe.
+
+The chain code stays in the tree for that future experiment, doubly gated (`NVPASCAL_CHAIN` **and**
+`NVPASCAL_CHAIN_ALLOW_UNSAFE=1`) so no environment variable can break this stack by accident. That
+leaves the SM clock (task C) as the only remaining decode lever.
+

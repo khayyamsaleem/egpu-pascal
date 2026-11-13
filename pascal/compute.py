@@ -102,9 +102,8 @@ def compute_state(tls_va, per_sm, code_va):
     return pb
 
 
-def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800, dyn_shared=0, lmem=0, cbanks=None):
-    """lmem = per-thread local memory bytes (stack/spills); cbanks = {bank: (va, size)} beyond bank 0."""
-    q = Qmd()
+def _fields(q, k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800, dyn_shared=0, lmem=0, cbanks=None):
+    """Every QMD field the launch path sets, so build_qmd and qmd_chain share one list."""
     q.set("SM_GLOBAL_CACHING_ENABLE", 1)
     q.set("RELEASE_MEMBAR_TYPE", 1)            # FE_SYSMEMBAR
     q.set("CWD_MEMBAR_TYPE", 1)                # L1_SYSMEMBAR
@@ -133,8 +132,48 @@ def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800, dyn_share
         q.set("CONSTANT_BUFFER_ADDR_UPPER", va >> 32, i)
         q.set("CONSTANT_BUFFER_SIZE_SHIFTED4", nvmmu.align(max(size, 0x10), 0x10) >> 4, i)
         q.set("CONSTANT_BUFFER_VALID", 1, i)
+    return q
+
+
+def build_qmd(k, grid, block, cb0_va, cb0_size, prog_off=0, crs=0x800, dyn_shared=0, lmem=0, cbanks=None):
+    """lmem = per-thread local memory bytes (stack/spills); cbanks = {bank: (va, size)} beyond bank 0."""
+    q = _fields(Qmd(), k, grid, block, cb0_va, cb0_size, prog_off, crs, dyn_shared, lmem, cbanks)
     if "--qmd-version" in sys.argv:
         q.set("QMD_VERSION", 1); q.set("QMD_MAJOR_VERSION", 2)
+    return q.bytes()
+
+
+def qmd_chain(k, grid, block, cb0_va, cb0_size, rel_va, payload, dep=True, group=None,
+              prog_off=0, dyn_shared=0):
+    """QMD for the chained launch path.  Two additions to the normal fields:
+
+    * RELEASE0: the GPU itself writes `payload` to `rel_va` when this grid *completes*, so the
+      completion signal needs neither WAIT_FOR_IDLE nor a pushbuffer semaphore -- WAIT_FOR_IDLE
+      drains the engine, which is exactly what serializes launches today.
+    * DEPENDENT_QMD_SCHEDULE_ENABLE + DEPENDENT_QMD_TYPE=GRID: do not start before the previous
+      grid in this channel.  This is the part the record says is still untried: without it, grids
+      from one channel are NOT serialized on GP102 (a pushbuffer semaphore goes backwards), which
+      is why WAIT_FOR_IDLE is there in the first place.
+
+    Built per launch rather than from the cache: the release address/payload differ every time, and
+    in this mode the GPU is the bound, not the host.  `dep` and `group` are swept by
+    test_depchain.py because the header does not say which of them makes the hardware order grids.
+    """
+    q = _fields(Qmd(), k, grid, block, cb0_va, cb0_size, prog_off, 0x800, dyn_shared, 0, None)
+    q.set("SEMAPHORE_RELEASE_ENABLE0", 1)
+    q.set("RELEASE0_ADDRESS_LOWER", rel_va & 0xffffffff)
+    q.set("RELEASE0_ADDRESS_UPPER", rel_va >> 32)
+    q.set("RELEASE0_REDUCTION_ENABLE", 0)              # plain write, not a reduction
+    q.set("RELEASE0_REDUCTION_OP", 0)                  # RED_ADD (ignored while disabled)
+    q.set("RELEASE0_REDUCTION_FORMAT", 0)              # UNSIGNED_32
+    q.set("RELEASE0_STRUCTURE_SIZE", 1)                # ONE_WORD
+    q.set("RELEASE0_PAYLOAD", payload & 0xffffffff)
+    if dep:
+        q.set("DEPENDENT_QMD_SCHEDULE_ENABLE", 1)
+        q.set("DEPENDENT_QMD_TYPE", 1)                 # GRID
+        q.set("DEPENDENT_QMD_FIELD_COPY", 0)
+    if group is not None:
+        q.set("QMD_GROUP_ID", group & 0x3f)
     return q.bytes()
 
 

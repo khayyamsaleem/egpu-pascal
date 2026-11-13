@@ -55,6 +55,16 @@ PB_SLOT, STAGE_CHUNK = 0x2400, 0x400000                    # pushbuffer per slot
 #   "cb"     cbuf0 uploaded to VRAM by the GPU from the pushbuffer (LOAD_INLINE_DATA), QMD in host
 #   "all"    both uploaded inline to VRAM (default)
 UPLOAD = os.environ.get("NVPASCAL_UPLOAD", "all")
+# Launch chaining (task B): "off" is the shipping path -- WAIT_FOR_IDLE after every grid, which is
+# what serializes launches today.  MEASURED AND CLOSED (RESULTS section 14): every alternative tried
+# here fails -- the QMD's own RELEASE0 into host memory never signals (the model load hangs waiting
+# for completions that never arrive), a pushbuffer semaphore with no WFI gives wrong results, and
+# DEPENDENT_QMD_SCHEDULE_ENABLE/TYPE=GRID deadlocks the channel at the second launch.  The modes
+# stay for pascal/test_depchain.py, but they need NVPASCAL_CHAIN_ALLOW_UNSAFE=1 so an environment
+# variable cannot silently break this stack.
+CHAIN = os.environ.get("NVPASCAL_CHAIN", "off")
+if CHAIN != "off" and os.environ.get("NVPASCAL_CHAIN_ALLOW_UNSAFE") != "1":
+    CHAIN = "off"
 VQMD_VA, VCB_VA = 0x06000000, 0x06100000                   # VRAM rings for the inline uploads
 NSTAGE = (HOST_SIZE - H_STAGE) // STAGE_CHUNK
 assert H_PB + NSLOT * PB_SLOT <= H_CB and H_CB + NSLOT * CB_SLOT <= H_STAGE
@@ -165,6 +175,7 @@ class Device:
         ch.vmm.map(ch.gp_va, iovas[H_GPFIFO // 0x1000], nvmmu.align(n, 0x1000), aper="sys_coh")
         ch.gp_host = self.hv[H_GPFIFO:H_GPFIFO + n]
         self.hseq = 0                              # last sequence number queued
+        self.chain = CHAIN                         # launch chaining mode (see CHAIN above)
         self.hslot = 0
         self.slot_seq = [0] * NSLOT                # seq of the launch that last used each slot
         self.slot_prof = [None] * NSLOT            # kernel name, if that launch was timed
@@ -237,6 +248,7 @@ class Device:
         po = H_PB + s * PB_SLOT
         m = compute.m
         pb = []
+        self.hseq = seq = (self.hseq + 1) & 0xffffffff   # before the QMD: the chain release carries it
         if UPLOAD == "host":
             cb_va, qmd_va = HOST_VA + H_CB + s * CB_SLOT, HOST_VA + H_QMD + s * 0x100
             hv[cb_va - HOST_VA:cb_va - HOST_VA + len(cb)] = cb
@@ -244,22 +256,36 @@ class Device:
             cb_va = VCB_VA + s * CB_SLOT
             qmd_va = VQMD_VA + s * 0x100 if UPLOAD == "all" else HOST_VA + H_QMD + s * 0x100
             pb += self._inline(cb_va, cb)
-        qmd = compute.qmd_fast(k, tuple(grid), tuple(block), cb_va, nvmmu.align(len(cb), 0x100), dyn_shared=smem)
+        if self.chain == "off":
+            qmd = compute.qmd_fast(k, tuple(grid), tuple(block), cb_va, nvmmu.align(len(cb), 0x100),
+                                   dyn_shared=smem)
+        else:
+            # Chained: the QMD's own RELEASE0 writes this launch's number into the host ring when the
+            # grid completes, so neither WAIT_FOR_IDLE nor the pushbuffer semaphore is needed, and the
+            # dependent/group fields ask the hardware to keep the order.  Built per launch, not
+            # cached: the release address and payload differ every time.
+            qmd = compute.qmd_chain(k, tuple(grid), tuple(block), cb_va, nvmmu.align(len(cb), 0x100),
+                                    rel_va=HOST_VA + H_SEM, payload=seq, prog_off=k["prog_off"],
+                                    dep=self.chain in ("dep", "both"),
+                                    group=(seq & 0x3f) if self.chain in ("group", "both") else None,
+                                    dyn_shared=smem)
         if UPLOAD == "all":
             pb += self._inline(qmd_va, qmd)
         else:
             hv[qmd_va - HOST_VA:qmd_va - HOST_VA + 0x100] = qmd
-        self.hseq = seq = (self.hseq + 1) & 0xffffffff
         if self.icache_dirty:                   # INVALIDATE_SHADER_CACHES: INSTRUCTION | DATA | CONSTANT
             pb += m(0x021c, (1 << 0) | (1 << 4) | (1 << 12))
             self.icache_dirty = False
         timed = timed or PROF
         if timed:
             pb += self._hsem(HOST_VA + H_PROF + s * 32, 0, True)
-        pb += m(0x02b4, qmd_va >> 8) + m(0x02bc, 0x3) + m(0x0110, 0)
+        pb += m(0x02b4, qmd_va >> 8) + m(0x02bc, 0x3)
+        if self.chain == "off":
+            pb += m(0x0110, 0)                  # WAIT_FOR_IDLE: the drain that serializes launches
         if timed:
             pb += self._hsem(HOST_VA + H_PROF + s * 32 + 16, 0, True)
-        pb += self._hsem(HOST_VA + H_SEM, seq, False)
+        if self.chain == "off":
+            pb += self._hsem(HOST_VA + H_SEM, seq, False)
         data = struct.pack("<%dI" % len(pb), *pb)
         assert len(data) <= PB_SLOT
         hv[po:po + len(data)] = data

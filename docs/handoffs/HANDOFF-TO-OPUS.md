@@ -58,12 +58,13 @@ OPEN TASKS, RE-RANKED AGAIN (supersedes the session-12 A/B/C list further down):
      Band 2 (1350 -> 118 GB/s) would buy nothing until that changes.  Default clock stays 1080;
      1134 measured, opt-in via --mclk 1134 (and it shows rare bit flips in a 100-pass soak).
      Voltage is still untouched and still needs the user's explicit OK.
-  B. Launch path: drop the per-launch WAIT_FOR_IDLE (~5-7%).  Needs real grid serialization: the
-     QMD's ACQUIRE/RELEASE semaphore fields (tools/nvclass/clc1c0qmd.h, already parsed by
-     compute.py's Qmd) so grid N+1 waits on grid N's release.  The earlier attempt failed because
-     the acquire never blocked (the semaphore "went backwards"), which is an encoding question to
-     check against the header, not proof the hardware cannot do it.  NOW THE BEST REMAINING TOK/S
-     LEVER: the card is launch bound (~900 launches/token) and this needs no consent.
+  B. Launch path: CLOSED (session 15, RESULTS.md section 14) -- and it needs no second look unless
+     someone wants to try the v01_07 QMD layout.  Measured: no WFI + QMD RELEASE0 into host memory
+     never signals (the model load hangs waiting for completions), no WFI + a pushbuffer semaphore
+     corrupts results, DEPENDENT_QMD_SCHEDULE_ENABLE/TYPE=GRID deadlocks the channel at the second
+     launch, and QMD_GROUP_ID does nothing.  WAIT_FOR_IDLE is load-bearing; the ~5-7% is not
+     reachable this way.  Harness kept for the v01_07 idea: pascal/test_depchain.py (needs
+     NVPASCAL_CHAIN_ALLOW_UNSAFE=1).
   C. SM clock via the FLL (NAFLL) + voltage: what NVIDIA's PMU firmware does; hard, and a voltage
      write needs the user's explicit OK.  This is where the remaining headroom actually is.
   D. Model-side, no hardware: KV cache q8_0 was measured and REJECTED this session (168 s /
