@@ -1,0 +1,74 @@
+snapshot: 413 registers -> /tmp/sweep-before.json (checksum cf766bc1eaa0e470)
+GPC before: 607.0 MHz
+SM clock sweep: 12 candidates, counters gpc2clk sys2clk xbar2clk dramdiv4_clk1
+
+== pair N+1: 0x137024=0x10814301, 0x137044=0x10814301
+    probe 0x137024: 0x10814201  writable
+    probe 0x137044: 0x10814201  writable
+    MOVED: gpc2clk 44996 -> 44995 (-0.00%), sys2clk 44997 -> 44996 (-0.00%), xbar2clk 44996 -> 44995 (-0.00%), dramdiv4_clk1 9953 -> 9958 (0.05%)
+    keeping it -- memtest and the bench next, then decide
+
+---- summary ----
+hits: [('pair N+1', [(1273892, 276906753), (1273924, 276906753)], {'gpc2clk': (44996, 44995), 'sys2clk': (44997, 44996), 'xbar2clk': (44996, 44995), 'dramdiv4_clk1': (9953, 9958)})]
+unsafe: none
+GPC after : 607.0 MHz
+snapshot: 413 registers -> /tmp/sweep2-before.json (checksum cf766bc1eaa0e470)
+GPC before: 607.0 MHz
+SM clock sweep: 12 candidates, counters gpc2clk sys2clk xbar2clk dramdiv4_clk1
+
+== pair N+1: 0x137024=0x10814301, 0x137044=0x10814301
+    probe 0x137024: 0x10814201  writable
+    probe 0x137044: 0x10814201  writable
+    no counter moved (gpc 44995, dram 9955)
+
+== ctrl bit0: 0x137020=0x00030011
+    probe 0x137020: 0x00030010  writable
+    no counter moved (gpc 44995, dram 9961)
+
+== relatch N+1: 0x137024=0x10814301, 0x137020=0x00030010
+    probe 0x137024: 0x10814201  writable
+    probe 0x137020: 0x00030010  writable
+    no counter moved (gpc 44995, dram 9953)
+
+== ctrl2 bit0: 0x137040=0x00010013
+    probe 0x137040: 0x00010012  writable
+    no counter moved (gpc 44996, dram 9962)
+
+== relatch2 N+1: 0x137044=0x10814301, 0x137040=0x00010012
+    probe 0x137044: 0x10814201  writable
+    probe 0x137040: 0x00010012  writable
+    no counter moved (gpc 44997, dram 9953)
+
+== coef N-1: 0x137024=0x10814101
+    probe 0x137024: 0x10814201  writable
+    no counter moved (gpc 44994, dram 9960)
+
+== coef P+1: 0x137024=0x10824201
+    probe 0x137024: 0x10814201  writable
+    no counter moved (gpc 44995, dram 9956)
+
+== 139310 low+1: 0x137310=0x87101617
+    probe 0x137310: 0x87101616  writable
+    no counter moved (gpc 44994, dram 9957)
+
+== 139310 b1+1: 0x137310=0x87101716
+    probe 0x137310: 0x87101616  writable
+    no counter moved (gpc 44995, dram 9958)
+
+== 139330 low+1: 0x137330=0x87100635
+    probe 0x137330: 0x87100634  writable
+    no counter moved (gpc 44995, dram 9954)
+
+== 139330 b1+1: 0x137330=0x87100734
+    probe 0x137330: 0x87100634  writable
+    no counter moved (gpc 44994, dram 9957)
+
+== 137300 low+1: 0x137300=0x20000104
+    probe 0x137300: 0x20000103  writable
+    no counter moved (gpc 44995, dram 9958)
+
+---- summary ----
+hits: none
+unsafe: none
+no candidate moved a clock: the GPC source is still not located by this block
+GPC after : 607.0 MHz

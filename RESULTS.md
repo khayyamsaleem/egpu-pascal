@@ -690,3 +690,35 @@ divider-shaped words (`0x137310 = 0x87101616`, `0x137330 = 0x87100634`). That is
 memory-clock work, which took several sessions of measured attempts -- except a mistake here can wedge
 the GPU. **No SM clock change is claimed, and nothing was left modified.**
 
+### The sweep: 12 candidates, all writable, none effective
+
+`pascal/smclk_sweep.py` drives the experiment properly: a same-value probe per register first (skip
+anything that will not read back), then one variable at a time, all four counters read as the **median
+of three** samples with a 0.5% threshold, and every candidate restored unless it actually moves a
+clock. Evidence: `logs/smclk/s15-sweep.log`, pre-sweep snapshot checksum `cf766bc1eaa0e470`.
+
+| candidate | result |
+|---|---|
+| both coefficient copies, N 66 -> 67 (`0x137024`, `0x137044`) | writable, no counter moved |
+| control-word strobe bit (`0x137020` bit 0) | writable, no counter moved |
+| re-latch: coefficient, then the control word again | writable, no counter moved |
+| the second pair (`0x137040` / `0x137044`), both ideas | writable, no counter moved |
+| coefficient N-1, and P+1 | writable, no counter moved |
+| divider-shaped words `0x137310`, `0x137330` (two fields each) | writable, no counter moved |
+| `0x137300`, low bit | writable, no counter moved |
+
+gpc2clk sat at 44994-44997 counts (607.0 MHz) through every one of them, with sys/xbar/dram equally
+unmoved. So that block is writable but does **not** own the GPC clock: it is a mirror, or it belongs to
+a domain none of the four counters can see. With the boot path being the VBIOS's **PMU app**
+(`pascal/devinit.py` loads it; there is no host init script for this clock) and nvgpu never writing FLL
+registers from the host, the honest verdict is that **the SM clock is PMU-firmware territory on this
+card**.
+
+The remaining avenue is therefore the PMU rather than a register: nvgpu reaches clocks by parsing the
+VBIOS FLL/VIN/volt tables into PMU *board objects* and then requesting a VFE (voltage/frequency) point
+(`clk_fll.c`, `clk_vin.c`, `volt_dev.c`, `ctrl/ctrlclk.h`, `ctrl/ctrlvolt.h`). That is a project --
+board-object plumbing against signed firmware whose command ABI would have to be read out of the
+VBIOS's PMU app with envydis -- not a session step, and the power-cycle risk of a bad frequency/voltage
+request is unchanged. Nothing is left modified: `smclk.py --diff` reports 0 registers differing from the
+pre-sweep snapshot, and the card serves again at 1080 MHz memory / 607 MHz SM.
+

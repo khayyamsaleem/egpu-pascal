@@ -70,12 +70,14 @@ OPEN TASKS, RE-RANKED AGAIN (supersedes the session-12 A/B/C list further down):
      writability probe, --apply with read-back verification and auto-restore, --verify (measures the
      real clock on the card via the trim counter) and --test (the two-test protocol).  Measured: the
      card sits at P8 (607 MHz actual; the perf table's P0 row asks ~797, so the lever is ~1.3x, not
-     2.4x -- the VBIOS quotes at 2x); the PLL-shaped block at 0x137024 (M=1, N=66, P=1) IS
-     host-writable, but writing N 66 -> 67 changed the clock by nothing (measured), so it needs a
-     strobe or is not the GPC source.  Next candidates: 0x137044 (second copy), 0x137020's strobe
-     bits, and the 0x137300 divider words (0x137310 = 0x87101616, 0x137330 = 0x87100634) -- each one
-     a measured single-variable write with the snapshot armed.  A mistake can wedge the GPU, so this
-     is a hunt to run deliberately, not in passing.
+     2.4x -- the VBIOS quotes at 2x); the PLL-shaped block at 0x137020/24 IS host-writable, and a
+     12-candidate sweep (pascal/smclk_sweep.py, logs/smclk/s15-sweep.log) left every one of them
+     writable and NONE effective: gpc2clk stayed at 44994-44997 counts through all of them.  So the
+     block does not own the GPC clock, and this clock is set by the VBIOS's PMU app (devinit.py loads
+     it; no host init script programs it) -- the SM clock is PMU-firmware territory.  The remaining
+     avenue is the PMU board-object path (clk_fll.c/clk_vin.c/volt_dev.c + ctrlclk/ctrlvolt: parse the
+     VBIOS FLL/VIN tables, load them as board objects, request a VFE point), which is a project, not a
+     session, and carries the same power-cycle risk.  Nothing left modified on the card.
   D. Model-side, no hardware: KV cache q8_0 was measured and REJECTED this session (168 s /
      12.6 tok/s vs 159 s / 13.4 tok/s) -- see RESULTS.md section 12.  Requantising the Q6_K output
      tensor is still untried (~170 MB/token less, ~+3%, i.e. inside this card's run-to-run noise).
