@@ -20,6 +20,15 @@ What `serve` does, skipping whatever is already up:
      405; pascal/mclk.py) and proven with a 9 GiB VRAM pattern test, stepping down to 810 and
      then 405 on failure; reset_engines + gr; then pascal/shimd.py (the driver server; it holds
      the card and keeps the Mac awake)
+
+     On 1134 MHz: pascal/mclk_measure.py now measures the real DRAM clock from the host (the
+     nvgpu trim counters; the register read-back was never a measurement), and 1134 is reachable
+     and real -- 92.0 GB/s read vs 87.3 at 1080, confirming session 11 -- but it buys *nothing*
+     end to end (162 s vs 159 s on the 12-turn bench, decode 13.5 vs 13.4 tok/s, both inside this
+     card's documented +-4% noise) because at 1080 the card already runs at 75% of its achievable
+     bandwidth and is bound by the 607 MHz SM clock and ~900 launches per token instead.  It also
+     shows rare single-bit flips in a 100-pass soak (marginal lanes), so the default stays 1080 and
+     1134 is opt-in: `--mclk 1134` or LOCAL_GPU_MCLK=1134.
   2. the runtime container: `llamacpp` (llama.cpp built for sm_61 + shim/build-cuda12), or
      `maxnightly` for MAX models (*-max)
   3. the model: downloaded once into the container's /models volume (resumable)
@@ -172,8 +181,16 @@ def card_out(*args):
 
 def set_mclk(mhz, gr_up=False):
     """Reclock the memory (pascal/mclk.py), reload GR, and prove the VRAM with a 9 GiB pattern
-    test. Returns the clock actually in use; on any failure re-POSTs and steps down."""
-    for target in [mhz] + [f for f in (MCLK_FALLBACK,) if f < mhz]:
+    test. Returns the clock actually in use; on any failure re-POSTs and steps down.
+
+    The plan is target, fallback, target again: coming down from a band-2 or mempll excursion the
+    check at the target fails until the clock has been cycled (RESULTS section 13), and settling
+    for the fallback silently costs ~30% of the bandwidth, so cycle and retry before giving up.
+    """
+    plan = [mhz] + [f for f in (MCLK_FALLBACK,) if f < mhz]
+    if mhz not in plan[1:]:
+        plan.append(mhz)
+    for target in plan:
         rc, cur = card_out("pascal/mclk.py", "get")
         cur = int(cur.split()[-1]) if rc == 0 and cur.split() else 0
         if cur != target:

@@ -47,26 +47,25 @@ New tooling: `mclk.py retrain <MHz> --live --patch=ADDR:VAL[,...] [--soft]` (ext
 the band script's trims, before training; report instead of abort) + the sweep driver.
 
 OPEN TASKS, RE-RANKED AGAIN (supersedes the session-12 A/B/C list further down):
-  A. Memory above 1134 MHz is now blocked on ONE question: what clock does the DRAM actually get?
-     Everything reachable by register inspection has been tried (see RULED OUT above).  0x132000
-     may not even be a memory PLL on GP102 -- on Pascal nvgpu programs the GPC clock through an
-     FLL/ADC (clk_fll.c/clk_vin.c) and sends the tables to PMU firmware.  Next step, in order:
-     (1) make the actual clock measurable without running GPU work -- read nvgpu's clock counters
-     twice with a known host delay (trim_gpc_bcast_clk_cntr_ncgpcclk_cfg/cnt 0x132924/0x132928,
-     sys 0x1373b0/0x1373b4, ltc 0x1373c0/0x1373c4; source gpc2clk = 0x70000000) at 405/810/1080
-     in mode 1 first, to find which counter (if any) tracks the memory clock;
-     (2) then read the nearest discrete-Pascal clock code nvgpu still carries (gp106 clk_gp106.c,
-     clk_fll.c, clk_vin.c, hw_trim_gp106.h) for how the memory clock is sourced, and compare its
-     enable/input path with r1373f4_init's mempll half; only then touch the card again.
+  A. Memory -- ANSWERED (session 15, RESULTS.md section 13), and it is no longer the top task.
+     pascal/mclk_measure.py measures the real clock per domain from nvgpu's trim counters, so the
+     question that blocked this ("what clock does the DRAM actually get?") is settled by
+     measurement: 1080 -> 537 f_CK, 1134 -> 564, and mode 2 asked for 1350 reaches 593 -- so
+     0x132000 *does* steer the memory clock and the band-2 wall is the timing/training side, not a
+     missing PLL.  But 1134 buys 87.3 -> 92.0 GB/s of bandwidth and *nothing* end to end (162 s /
+     13.5 tok/s vs 159 s / 13.4 at 1080, same args): decode runs at 75% of the achievable bandwidth
+     (69.5 GB/s of weights against a 92 GB/s read), so this card is SM-clock and launch bound now.
+     Band 2 (1350 -> 118 GB/s) would buy nothing until that changes.  Default clock stays 1080;
+     1134 measured, opt-in via --mclk 1134 (and it shows rare bit flips in a 100-pass soak).
      Voltage is still untouched and still needs the user's explicit OK.
   B. Launch path: drop the per-launch WAIT_FOR_IDLE (~5-7%).  Needs real grid serialization: the
      QMD's ACQUIRE/RELEASE semaphore fields (tools/nvclass/clc1c0qmd.h, already parsed by
      compute.py's Qmd) so grid N+1 waits on grid N's release.  The earlier attempt failed because
      the acquire never blocked (the semaphore "went backwards"), which is an encoding question to
-     check against the header, not proof the hardware cannot do it.  This is now the best
-     remaining tok/s lever that does not depend on the memory question.
+     check against the header, not proof the hardware cannot do it.  NOW THE BEST REMAINING TOK/S
+     LEVER: the card is launch bound (~900 launches/token) and this needs no consent.
   C. SM clock via the FLL (NAFLL) + voltage: what NVIDIA's PMU firmware does; hard, and a voltage
-     write needs the user's explicit OK.
+     write needs the user's explicit OK.  This is where the remaining headroom actually is.
   D. Model-side, no hardware: KV cache q8_0 was measured and REJECTED this session (168 s /
      12.6 tok/s vs 159 s / 13.4 tok/s) -- see RESULTS.md section 12.  Requantising the Q6_K output
      tensor is still untried (~170 MB/token less, ~+3%, i.e. inside this card's run-to-run noise).

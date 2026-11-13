@@ -544,3 +544,64 @@ runs also spread 13.07 / 13.52 / 13.78 median across sessions, so treat anything
 noise. The default stays as session 12 left it; the 1080 MHz ceiling (87 GB/s against a 5.15 GB
 per-token read) is what bounds decode, which is why task A is the memory PLL and not the knobs.
 
+## 13. The memory clock is now measurable -- and it is no longer the constraint (session 15)
+
+**The question this project was blocked on ("what clock does the DRAM actually get?", since the PLL
+read-back is not a measurement) is now answered on the card, and the answer redirects the work.**
+
+`pascal/mclk_measure.py` drives nvgpu's own trim counters -- `hw_trim_gp106.h` for the registers,
+`gp106_get_rate_cntr` in `clk_gp106.c` for the method (both vendored under `docs/reference/files/`).
+Each counter counts a selected clock for a fixed crystal-referenced window, so host timing cancels
+out and the reading is a real frequency, not a register value:
+
+| counter | cfg / cnt | source field |
+|---|---|---|
+| gpc2clk (SM) | 0x132924 / 0x132928 | 0x70000000 |
+| sys2clk | 0x1373b0 / 0x1373b4 | 0x00000000 |
+| xbar2clk | 0x1373c0 / 0x1373c4 | 0x20000000 |
+| **dramdiv4_clk1** | **0x132128 / 0x13212c** | **0x30000000, scale 4** |
+
+The DRAM one is nvgpu's `CTRL_CLK_DOMAIN_MCLK`: its source is the DRAM clock / 4, scaled by 4, so
+it reads the memory clock itself. Measured (five samples each, spread 0.01%):
+
+| driver asks for | dram counter f_CK | quoted (f_CK x 2) | read bandwidth (memtest) |
+|---|---|---|---|
+| 405 (boot) | — | — | 31.1 GB/s |
+| 1080 | 537.1 - 537.4 | 1074 - 1075 | 87.3 GB/s |
+| 1134 | 564.0 - 564.4 | 1128 - 1129 | 92.0 GB/s |
+| 1350 **via mode 2** (training fails) | 593.3 | 1187 | — |
+
+Four things follow:
+
+1. **The register read-back was honest.** The counter puts 1080 at 537.1 f_CK = 1075 quoted, i.e.
+   the PLL rounds to its nearest achievable point, which is exactly what a counter should show.
+2. **The counter tracks the memory clock.** 1134/1080 = 1.05, and 537.1 x 1.05 = 564.0 -- measured.
+   Any future reclock can now be judged without running GPU work, which is what section 12 needed.
+3. **Mode 2 (the mempll at 0x132000) *does* drive the DRAM clock after all.** Asked for 1350 it
+   achieves 593.3 f_CK (1187 quoted) -- up from 537 -- so the previous session's "0x132000 may not be
+   a memory PLL at all on Pascal" is answered: it is, or at least it steers the memory clock. What
+   fails is the *timing* side: band-2 training never completes, and the achieved clock is not the
+   target. Recovery back to mode 1 lands at 537.4, verified healthy.
+4. **1134 MHz buys nothing end to end, so the memory clock has stopped being the lever.** Same
+   argument set, speculation off: 162 s / 13.5 tok/s at 1134 vs the recorded 159 s / 13.4 at 1080
+   (inside the +-4% noise above), while the memory test itself does gain 87.3 -> 92.0 GB/s. Decode
+   moves 69.5 GB/s of weights against a 92 GB/s achievable read = **75% of the bandwidth ceiling**,
+   so the binding constraints are the 607 MHz SM clock and the ~900 launches per token. The same
+   reasoning says band 2 (1350 -> 118 GB/s) would also buy nothing until the SM/launch path moves:
+   task A is no longer the highest-value memory work, tasks B and C are.
+
+**Calibration, and why these numbers are trustworthy.** The four counters agree with each other to
+0.01% but neither paper reading of `noofipclks` puts gpc2clk at its known 607 MHz, so the scale is
+anchored on the SM clock -- measured independently with `%clock64` in `bench.py` -- and every other
+domain is a ratio against it. The anchor is then checkable: 537 f_CK x 4 transfers x 44 B = 94.5
+GB/s ceiling vs 87.3 measured (92%) at 1080, and the same model predicts 35.6 / 71.3 GB/s at 405 /
+810 against 31.1 / 64.0 measured. Four independent bandwidth points, one free constant.
+
+**Two operational findings, both measured today.** n-gram speculation (`-bs --spec-type ngram-mod`,
+on by default) changes the end-to-end shape completely -- 12 turns in 67 s / 42.8 tok/s overall with
+it, 162 s / 13.5 without -- so end-to-end numbers are only comparable within one argument set, and
+the recorded 159 s baselines are not comparable to a speculated run. And `set_mclk` used to settle
+for the 810 fallback when the target failed verification after a clock excursion (costing 30% of the
+bandwidth silently); it now cycles and retries the target once first, which is the recovery the
+notes already described by hand.
+
