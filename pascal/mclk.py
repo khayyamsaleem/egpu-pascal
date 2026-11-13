@@ -11,11 +11,22 @@ card reads back, and `status` is the negative control before and after.
   set <MHz> [--live]  reclock along the refpll path (<= 1620 MHz); without --live, print the
                       writes only. The card must be idle: no shimd, no client. Ramps through
                       810 and then 54 MHz steps (big jumps fail training); --jump disables that.
+  retrain <MHz>       re-program the active band's bank + re-run the training tail at the current
+                      clock (no clock change): the cheap way to test PHY settings.
+
+  --patch=ADDR:VAL[,ADDR:VAL...]  extra register writes after the band script's trims, before
+                      training (hex).  --soft: report incomplete training instead of aborting.
+                      Both exist for PHY trim sweeps: whether a DRAM trains at a given clock is
+                      board-specific and the VBIOS only ships NVIDIA's reference trims.
 
 Measured on this card (logs/mclk/, pascal/memtest.py, 9 GiB x 3 patterns unless noted):
   405 (boot)  31.1 GB/s read   810  64.0   1080  87.3 (200-pass soak at 42 C: clean)
   1134  92.0: clean cold (36 C, 100 passes) but 17 single-bit flips warm (42 C), top byte lane
   1188, 1296: train but corrupt data -> card faults.  1620 (band 2 config): does not train.
+  Band 2 (>=1300) never completes training on the refpll path, at any clock tried (1350, 1620),
+  with or without a ramp: the DRAM delays do train but FBPA status bits 1|3 stay set, and the
+  first GPU work after it hangs with GP_GET garbage (PBDMA INTR 0x20000000).  Its bank script's
+  trims (0x03 lanes / Vref 0x5353) and the band-2 timing (CL 20) are the difference from band 1.
 
 Usage: ~/.venvs/tinygpu/bin/python pascal/mclk.py status
 """
@@ -278,7 +289,7 @@ class Seq:
         return True
 
 
-def train(s, fbpas, m, d, why):
+def train(s, fbpas, m, d, why, soft=False):
     s.mask(FB + 0x910, m, d, why)
     s.mask(FB + 0x914, m, d, why)
     if d & 0x80000000:
@@ -301,7 +312,29 @@ def train(s, fbpas, m, d, why):
                 b = 0x900000 + i * 0x4000
                 print("      FBPA%d status %x  trained delays 6a8=%08x 6ac=%08x" % (i, s.c.rd(b + 0x974) & 0xf, s.c.rd(b + 0x6a8), s.c.rd(b + 0x6ac)))
         if bad:
-            raise RuntimeError("training did not complete on FBPA %s" % bad)
+            msg = "training did not complete on FBPA %s" % bad
+            if not soft:
+                raise RuntimeError(msg)
+            print("      INCOMPLETE: %s (--soft, continuing)" % msg)
+
+
+def cli_patches(argv):
+    """--patch=ADDR:VAL[,ADDR:VAL...] (hex): extra register writes applied after the bank script's
+    trims and before training/retraining.  Exists for PHY trim sweeps: which per-lane delay/Vref
+    values the DRAM trains cleanly with is board-specific, and the VBIOS only ships NVIDIA's."""
+    out = []
+    for a in argv:
+        if a.startswith("--patch="):
+            for kv in a[len("--patch="):].split(","):
+                k, _, v = kv.partition(":")
+                out.append((int(k, 16), int(v, 16)))
+    return out
+
+
+def apply_patches(s, patches):
+    for a, val in patches:
+        s.wr(a, val, "patch (after the bank script)")
+
 
 
 def cond_overrides(fbpas):
@@ -311,7 +344,7 @@ def cond_overrides(fbpas):
     return {0x30: 3 in fbpas, 0x31: 4 in fbpas and 5 in fbpas}
 
 
-def program_bank(s, v, idx, bank, fbpas):
+def program_bank(s, v, idx, bank, fbpas, patches=()):
     """nouveau gp100_ram_init, for one mode: select the write bank, run that mode's script."""
     from vbinit import Init, mode_scripts
     save = s.rd(FB + 0x65c)
@@ -320,23 +353,24 @@ def program_bank(s, v, idx, bank, fbpas):
     it.run(mode_scripts(v)[bank])
     for w in it.writes:
         print("    script %d: %s" % (bank, ("wr %06x <- %08x" % w) if isinstance(w[0], int) else "%s %s" % w))
+    apply_patches(s, patches)
     s.mask(FB + 0x65c, 0xf0, save & 0xf0, "restore write bank")
 
 
-def train_tail(s, fbpas, rc, rm):
+def train_tail(s, fbpas, rc, rm, soft=False):
     fb = lambda r: FB + r
     print("  [train]")
     data = (0x88020000 | (0x10000000 if rc["r07_04"] else 0) | (0 if rm["m08_10"] else 0x00080000)) \
         if not rc["r07_08"] else 0xa40e0000
-    train(s, fbpas, 0xbc0f0000, data, "train")
+    train(s, fbpas, 0xbc0f0000, data, "train", soft=soft)
     s.mask(fb(0x830), 0x01000000, 0x01000000)
     s.mask(fb(0x830), 0x01000000, 0)
     if rc["r07_02"]:
-        train(s, fbpas, 0x80020000, 0x01000000, "train 07_02")
+        train(s, fbpas, 0x80020000, 0x01000000, "train 07_02", soft=soft)
     s.mask(fb(0x200), 0x00000800, 0x800 if rm["m08_01"] else 0)
 
 
-def retrain(c, v, idx, mhz, live):
+def retrain(c, v, idx, mhz, live, patches=(), soft=False):
     """Re-program the active band's bank and re-run the training tail, at the current clock."""
     band, rm, rc, tm = target_config(v, idx, mhz)
     fbpas = [i for i in range(12) if c.rd(0x90020c + i * 0x4000) >> 16 != 0xbadf]
@@ -346,11 +380,13 @@ def retrain(c, v, idx, mhz, live):
         raise SystemExit("active bank is %d, band %d wants %d: use set" % (c.rd(FB + 0x65c) & 0xf, band, bank))
     print("retrain band %d bank %d, FBPAs %s; %s" % (band, bank, fbpas, "LIVE" if live else "DRY RUN"))
     if bank:
-        program_bank(s, v, idx, bank, fbpas)
-    train_tail(s, fbpas, rc, rm)
+        program_bank(s, v, idx, bank, fbpas, patches)
+    else:
+        apply_patches(s, patches)
+    train_tail(s, fbpas, rc, rm, soft=soft)
 
 
-def reclock(c, v, idx, mhz, live):
+def reclock(c, v, idx, mhz, live, patches=(), soft=False):
     regs = snapshot(c)
     cur = mclk_khz(regs)
     if cur["src"] != 1 or cur["mpll"][3]:
@@ -371,7 +407,9 @@ def reclock(c, v, idx, mhz, live):
     # 0. this band's FBPA register bank (devinit only programs bank 0)
     if bank:
         print("  [bank] program bank %d from the VBIOS mode script" % bank)
-        program_bank(s, v, idx, bank, fbpas)
+        program_bank(s, v, idx, bank, fbpas, patches)
+    else:
+        apply_patches(s, patches)
 
     # 1. into self-refresh (gk104_ram_calc_gddr5, from mode 1)
     print("  [enter] stop refresh, precharge, self-refresh")
@@ -486,7 +524,7 @@ def reclock(c, v, idx, mhz, live):
     s.mask(fb(0x830), 0, 0x00000001)
 
     # 6. retrain at the new clock
-    train_tail(s, fbpas, rc, rm)
+    train_tail(s, fbpas, rc, rm, soft=soft)
     print("  %d writes" % s.n)
     if live:
         after = snapshot(c)
@@ -515,7 +553,8 @@ def main():
         dump_regs(regs)
         return 0
     if cmd == "retrain":
-        retrain(c, v, idx, int(sys.argv[2]), live="--live" in sys.argv)
+        retrain(c, v, idx, int(sys.argv[2]), live="--live" in sys.argv,
+                patches=cli_patches(sys.argv), soft="--soft" in sys.argv)
         return 0
     if cmd == "set":
         mhz = int(sys.argv[2])
@@ -532,7 +571,7 @@ def main():
             steps += [f for f in range(cur + sgn * 54, mhz, sgn * 54)] + ([mhz] if mhz != cur or not steps else [])
             print("ramping %d -> %d MHz via %s" % (live_mclk_mhz(c), mhz, steps))
         for f in steps:
-            reclock(c, v, idx, f, live=live)
+            reclock(c, v, idx, f, live=live, patches=cli_patches(sys.argv), soft="--soft" in sys.argv)
         return 0
     print("unknown command %r" % cmd)
     return 2

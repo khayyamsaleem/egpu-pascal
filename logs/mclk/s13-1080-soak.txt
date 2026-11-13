@@ -1,0 +1,23 @@
+testing 9 x 1024 MiB = 9.00 GiB of VRAM (PA 0x40000000 .. 0x280000000)
+seed 00000000: 0 bad words over 9.00 GiB
+seed ffffffff: 0 bad words over 9.00 GiB
+seed 5a5aa5a5: 0 bad words over 9.00 GiB
+seed 13579bdf: 0 bad words over 9.00 GiB
+seed deadbeef: 0 bad words over 9.00 GiB
+seed 00000000: 0 bad words over 9.00 GiB
+seed ffffffff: 0 bad words over 9.00 GiB
+seed 5a5aa5a5: 0 bad words over 9.00 GiB
+seed 13579bdf: 0 bad words over 9.00 GiB
+seed deadbeef: 0 bad words over 9.00 GiB
+seed 00000000: 0 bad words over 9.00 GiB
+seed ffffffff: 0 bad words over 9.00 GiB
+seed 5a5aa5a5: 0 bad words over 9.00 GiB
+seed 13579bdf: 0 bad words over 9.00 GiB
+seed deadbeef: 0 bad words over 9.00 GiB
+seed 00000000: 0 bad words over 9.00 GiB
+seed ffffffff: 0 bad words over 9.00 GiB
+seed 5a5aa5a5: 0 bad words over 9.00 GiB
+seed 13579bdf: 0 bad words over 9.00 GiB
+seed deadbeef: 0 bad words over 9.00 GiB
+write bandwidth 65.4 GB/s (min 56.8), read bandwidth 87.4 GB/s (min 87.1); 5 s
+RESULT: PASS

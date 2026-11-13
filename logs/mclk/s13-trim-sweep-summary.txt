@@ -1,0 +1,12 @@
+band2-default    training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+band1-trims      training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+band1-delays     training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+dly08            training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+dly0a            training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+dly10            training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+dly18            training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+dly00            training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+vref-only-4d4d   training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+vref-only-5a5a   training incomplete  (    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000))
+
+combos that completed training: []

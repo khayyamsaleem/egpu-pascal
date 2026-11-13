@@ -16,7 +16,10 @@ Two runtimes reach it through a libcuda/NVML shim over TinyGPU:
   **Gemma 4 E4B (QAT Q4_0) at 13.5 tok/s** with tool calling.
 
 **The memory is reclocked** from the 405 MHz boot clock to **1080 MHz** (31 -> 87 GB/s), the
-first Pascal memory reclock by an open driver (`pascal/mclk.py`; RESULTS.md section 10).
+first Pascal memory reclock by an open driver (`pascal/mclk.py`; RESULTS.md section 10). The
+VBIOS bands above 1134 MHz are out of reach on that (refpll) path — band 2 never completes DRAM
+training and the first GPU work after it hangs — so the next lever is the memory PLL the high
+bands need (RESULTS.md section 12).
 
 [`bin/local-gpu`](localgpu/) brings the whole stack up with one command: card init if it is
 cold, the driver server, the right container, a resumable model download, an Ollama-compatible

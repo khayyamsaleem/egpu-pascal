@@ -1,10 +1,68 @@
 HANDOFF — GTX 1080 Ti (GP102) bring-up over TinyGPU on a MacBook Air M1
 Rewritten 2026-11-12, end of session 10; section 0 added at the end of session 11
-(same day, later).  READ SECTION 0 FIRST: it supersedes the clock numbers, the
-performance table and the task ranking in sections 2-4.  This file replaces the session-5
+(same day, later), and session 13's block now leads it.  READ SECTION 0 FIRST: it
+supersedes the clock numbers, the performance table and the task ranking in sections 2-4.
+This file replaces the session-5
 
 =====================================================================
-0. SESSION 11 (2026-11-12, night): THE MEMORY IS RECLOCKED
+0. LATEST SESSIONS: THE MEMORY IS RECLOCKED (session 13 leads, then 12, then 11)
+=====================================================================
+
+---- SESSION 13 (2026-11-12, later) -- BAND 2 RULED OUT ON THE REFPLL PATH ----
+Full evidence: RESULTS.md section 12.  The repo's four unpushed commits are pushed
+(origin/main = 61c2289 at the start of this session).
+
+Session 12's task A ("memory beyond 1134 MHz in the mode we are already in, by configuring the
+next VBIOS band properly") does not work, and the reasons below are measured, not inferred:
+  * A real ramp into band 2 (1080 -> 1134 -> 1188 -> 1242 -> 1296 -> 1350, 54 MHz steps) programs
+    the refpll (1350 reported) and band 2's bank script + timing entry 2, but FBPA training never
+    completes: status 0xa on all six FBPAs, 0x900974 & 0xf never reaches 0, delays mid-range (not
+    the saturated 0x1f of the old 1620 --jump attempt).
+  * The first GPU work after it hangs: reset_engines + gr PASS, then `compute state` never
+    completes -- GP_GET garbage, FIFO_INTR 0x20000000, PBDMA INTR bit 24.  Memory subsystem, not
+    the engine.
+  * RULED OUT (do not re-try): (1) the ramp -- a step ramp fails exactly like the jump;
+    (2) the 0x9a04xx band registers gk104_ram_prog_0 writes -- decoding this VBIOS with nouveau's
+    rammapEp v0x11 layout shows DEVINIT/the PMU already leave BAND 2's values in every one of
+    them at boot; (3) the PHY trims -- 10 combos at 1350 (logs/mclk/s13-sweep-*, driver
+    logs/mclk/s13-trim-sweep.py) make training complete in none, and those registers do not read
+    back what the script writes (0x9846a8, 0x9a070c), so the PMU/training engine owns them.
+
+RECOVERY, learned twice today: after a band-2 excursion the 1080 check fails right after the
+down-ramp and passes again after cycling the clock -- `mclk.py set 810 --live` then
+`set 1080 --live`, then `local-gpu serve` (reset_engines + gr + the 20-pass check).  Do not use
+the down-ramp alone.  Also: devinit + fb do NOT rewrite the refpll coefficient or the DRAM band
+config, so `mclk.py get` can name a clock the DRAM is no longer configured for after a repost;
+memtest is the judge.
+
+New tooling: `mclk.py retrain <MHz> --live --patch=ADDR:VAL[,...] [--soft]` (extra writes after
+the band script's trims, before training; report instead of abort) + the sweep driver.
+
+OPEN TASKS, RE-RANKED AGAIN (supersedes the session-12 A/B/C list further down):
+  A. Mode 2 = the mempll (0x132004), now the only route up.  nouveau picks the clock source by
+     frequency alone (`ramgk104.c`: mode 2 only above the refpll VCO max, 1620 here), so bands
+     2/3 above 1620 need: `gk104_pll_calc_hiclk`'s refpll reference + mempll coefficients,
+     r1373f4_init/_fini's mode-2 branch (0x1373f4 |= 0x1100 then |= 0x10; 0x132004 =
+     (x & ~0x103fffff) | ((P2-1)<<28 | N2<<8 | M2); 0x137390 bit 1 lock; source 2), and the
+     mode-2-only writes in gk104_ram_calc_gddr5 (0x9a0800 &= ~4, 0x1373f0 |= 2, 0x9a0830 =
+     (x & ~0x00800001) | 0x00408010, 0x9a0808 |= 0x80000, 0x9a0200 = (x & ~0x00808000) |
+     0x00800000, and no 0x9a0694 write).  Addresses 0x10fXXX -> 0x9a0XXX; read the result as
+     clk/gk104.c read_mem does (src 2 -> read_pll(0x132000)).  First target 1674; expect to need
+     the two-phase transition gk104_ram_prog uses (prog_0(1000) then prog_0(target)).  No voltage
+     change; a failed attempt costs the recovery above, not hardware.  Reference facts:
+     docs/reference/README.md ("How the memory clock is selected on this chip").
+  B. Launch path: drop the per-launch WAIT_FOR_IDLE (~5-7%).  Needs real grid serialization: the
+     QMD's ACQUIRE/RELEASE semaphore fields (tools/nvclass/clc1c0qmd.h, already parsed by
+     compute.py's Qmd) so grid N+1 waits on grid N's release.  The earlier attempt failed because
+     the acquire never blocked (the semaphore "went backwards"), which is an encoding question to
+     check against the header, not proof the hardware cannot do it.
+  C. SM clock via the FLL (NAFLL) + voltage: what NVIDIA's PMU firmware does; hard, and a voltage
+     write needs the user's explicit OK.
+  D. Model-side, no hardware: KV cache quantisation and requantising the Q6_K output tensor
+     (~170 MB/token less, ~+3%).  Measured this session: see RESULTS.md section 12 / logs/bench/.
+
+=====================================================================
+SESSION 11-12 text follows, unchanged (its ranking is superseded by the list above)
 =====================================================================
 The GDDR5X now runs at 1080 MHz (was the 405 MHz boot clock): 87.3 GB/s read
 (was 31.1).  Gemma 4 E4B on llama.cpp decodes at 13.5 tok/s (was 6.83), and the

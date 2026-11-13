@@ -38,6 +38,40 @@ f_CK 1375 MHz (WCK 2750), so the failures from 1188 MHz up are on the **controll
 (bank-1 PHY settings / training), not a DRAM limit. The mode-register definitions (needed to
 configure band 2 properly) are in JEDEC JESD232, not in this brief.
 
+## How the memory clock is selected on this chip (from nouveau's source)
+
+Three separate things, easy to conflate (all in `drivers/gpu/drm/nouveau/nvkm/`):
+
+| choice | decided by | where |
+|---|---|---|
+| **band** (rammap entry: `min..max`, timings index, masks) | the target frequency | `nvbios_rammapEe`, `gk104_ram_calc_data` |
+| **FBPA register bank** (which set of PHY trims the hardware reads) | the band's `rammap_11_11_0c` field → write bank `0x10f65c[7:4]`, active bank `[3:0]` | `gk104_ram_prog_0`/`gk104_ram_init` (the comment there: "each script is for a separate mode (likely selected by 0x10f65c's lower bits?)").  Pascal moved the block: 0x10fXXX → 0x9a0XXX |
+| **clock source / mode** (refpll vs mempll) | **frequency only**: `ram->mode = (next->freq > fuc->refpll.vco1.max_freq) ? 2 : 1` (`ramgk104.c`) — 1620 MHz here, the refpll VCO max | mode 1 = refpll `0x132024` (src bit `0x1373f4[1:0]` = 1); mode 2 = mempll `0x132004` (src = 2) |
+
+Mode-2 writes mode 1 has no counterpart for (`r1373f4_init`/`_fini`, `gk104_ram_calc_gddr5`):
+`0x1373f4 |= 0x1100` then `|= 0x10`; mempll: `0x132000 |= 0x80000000`, `0x132004 = (x &
+~0x103fffff) | mcoef` with `mcoef = ((P2-1) << 28) | (N2 << 8) | M2`, wait `0x137390` bit 1; source
+`0x1373f4[1:0] = 2` and `0x1373f4 &= ~0x1100`; plus `0x9a0800 &= ~4`, `0x1373f0 |= 2`, `0x9a0830 =
+(x & ~0x00800001) | 0x00408010`, `0x9a0808 |= 0x00080000`, `0x9a0200 = (x & ~0x00808000) |
+0x00800000`, and *no* write to `0x9a0694`. `gk104_pll_calc_hiclk` picks the refpll reference
+frequency (~180 MHz, P1 5..7, N1 0x25..0x2b) and N2 so that the mempll output is the target.
+
+Reading a clock back (`nvkm/subdev/clk/gk104.c`, `read_mem`/`read_pll`):
+`src 1 → read_pll(0x132020)` (coef at +4, `0x132030` for fN), `src 2 → read_pll(0x132000)` with
+`P = (coef & 0x10000000) ? 2 : 1`, `N = (coef >> 8) & 0xff`, `M = coef & 0xff`, `sclk` = the
+refpll's output, `fN = 0xf000`; `out = (sclk * N + (((u16)(fN + 4096) * sclk) >> 13)) / (M * P)`.
+
+Band-dependent registers `gk104_ram_prog_0` writes after a band change, with the rammap fields
+(`nvbios_rammapEp` v0x11 reads them from one `rd32(entry + 0x09)`; the field names give byte+mask):
+0x9a0468 ← `09_01ff`, `0a_03fe << 12`; 0x9a0420 ← `0a_0400`; 0x9a0430 ← `0a_0800`; 0x9a0400 ←
+`0b_01f0`; 0x9a0410 ← `0b_0200 << 9`; 0x9a0440 ← `0d << 16`, `0f << 8`; 0x9a0444 ← `0e << 8`,
+`0b_0800 << 7`, `0b_0400 << 5`. On this card DEVINIT/the PMU already leave **band 2's** values
+there at boot, so they are not what a band-2 reclock is missing (RESULTS.md section 12).
+
+nouveau sources used above (local copies: `tools/nvkm/subdev/fb/ramgk104.c`, and the other two
+fetched on demand): `drivers/gpu/drm/nouveau/nvkm/subdev/fb/ramgk104.c`,
+`nvkm/subdev/bios/rammap.c`, `nvkm/subdev/clk/gk104.c` (torvalds/linux, `master`).
+
 ## NVIDIA's own documentation (open-gpu-doc, MIT-licensed)
 
 * [MemoryClockTable](https://github.com/NVIDIA/open-gpu-doc/tree/master/MemoryClockTable)

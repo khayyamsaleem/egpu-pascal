@@ -461,3 +461,64 @@ Research (docs/reference/README.md): the GDDR5X datasheet puts the DRAM's own DD
 failures are controller-side. NVIDIA's nvgpu shows the Pascal GPC clock is an FLL programmed,
 with the voltage PWM, by PMU firmware -- the hard path. The gpu-unlock repos unlock tensor-core
 rates on Turing/Ampere/Ada and do not apply to GP102.
+
+## 12. VBIOS band 2 (>=1300 MHz) does not work on the refpll path (session 13, 2026-11-12)
+
+Session 12's ranked task #1 was memory above 1134 MHz, "in the mode we are already in, by
+configuring the next VBIOS band properly". It does not work, and this is what rules it out.
+
+**What was tried.** `mclk.py set 1350 --live` from 1080 (a real ramp: 1134, 1188, 1242, 1296,
+1350 -- the only attempt on record before this was a single `--jump` from 810 to 1620). The
+refpll reaches 1350 (`mclk.py get` = 1350, coef 0x00013101) and band 2's bank script and timing
+entry 2 are programmed (`9a065c` = 0x22 active bank 2, MR0 CL 20 / WL 5 / WR 24). But **training
+never completes**: the `0x900974 & 0xf == 0` wait times out on all six FBPAs, status 0xa (bits
+1|3) on every one, even though the trained delays are plausible (6a8/6ac mid-range, not the
+saturated 0x1f of the 1620 attempt). `--soft` shows the run is otherwise complete.
+
+**The first GPU work after it hangs.** `pascal/reset_engines.py` + `gr.py` still PASS (FECS fine,
+no MMU fault), then `memtest.py` dies creating its device:
+`submission 'compute state' did not complete: GP_GET=723497779 GP_PUT=1 chan=15000003
+FIFO_INTR=20000000`. Identical signature to the 1620 attempt: the memory subsystem cannot serve
+the fetch, not the engine.
+
+**Ruled out, each by measurement:**
+
+| candidate | why not |
+|---|---|
+| the ramp itself (1620 was a 810 MHz jump) | a 54 MHz-step ramp to 1350 fails identically |
+| the 0x9a04xx band registers `gk104_ram_prog_0` writes | decoding this VBIOS with nouveau's `nvbios_rammapEp` v0x11 layout (`temp = rd32(entry + 0x09)`; field names encode byte+mask) shows **DEVINIT/the PMU already left band 2's values in all of them at boot**: 0x9a0400[4:0] = 0x1f = band 2's `0b_01f0`; 0x9a0420[0] = 1 = `0a_0400`; 0x9a0440[23:16] = 0xe4, [15:8] = 0xff = `0d`/`0f`; 0x9a0444[15:8] = 0x44 = `0e`; 0x9a0468[8:0] = 0x40 = `09_01ff`, [20:12] = 0x40 = `0a_03fe`. Bands 2-5 share bytes 0x08-0x10 in the rammap entry; band 0/1 differ, band 2 is what is live |
+| the PHY trims (per-lane delay seeds, Vref, masks) | 10-combo sweep at 1350 (`retrain --patch=`, delays 0x00/0x08/0x0a/0x10/0x12/0x18, Vref 0x4d4d/0x5353/0x5a5a, band 1's masks): training completes in **none** (`logs/mclk/s13-sweep-*`, summary in `s13-trim-sweep-summary.txt`). The trim registers also do not read back what the script wrote (0x9846a8 = 0x12121212 after a 0x03030303 write; 0x9a070c reads 0) -- the PMU or the training engine owns them, so patching is a weak probe |
+
+**Reading.** Band 2 is the mode-2 band: nouveau picks the FBPA bank from the rammap entry but
+picks the *clock source* by frequency -- `ramgk104.c`: `ram->mode = (next->freq >
+fuc->refpll.vco1.max_freq) ? 2 : 1`, i.e. mode 2 (MPLL at 0x132004) starts only above the refpll
+VCO max of 1620 MHz, and mode 2 also flips `0x1373f4 |= 0x1100`, `0x1373f0 |= 2` and the
+0x9a0830/0x9a0808/0x9a0200 bits `mclk.py` never writes. Until that path is ported, memory stays
+where session 12 left it; the checks above exist so the port is the next thing tried instead of
+the 0x9a04xx/trim theories.
+
+**Operational, learned twice today:** after a band-2 excursion the startup check at 1080 fails
+*immediately after a down-ramp* from 1350 (local-gpu stepped down to 810 on its own), and passes
+again after cycling 810 -> 1080 (20 passes, 87.4 GB/s, 0 bad words). Recovery is
+`mclk.py set 810 --live` then `set 1080 --live` -- not the down-ramp by itself. Also: `mclk.py
+get` reports the *refpll coefficient*, which `devinit.py` + `fb.py` do not rewrite, so after a
+repost it can name a clock the DRAM is no longer configured for; the VRAM pattern test is what
+decides, never `get`.
+
+New tooling (this session): `mclk.py --patch=ADDR:VAL[,ADDR:VAL...]` (extra writes after the
+band script's trims, before training) and `--soft` (report incomplete training instead of
+aborting), plus `logs/mclk/s13-trim-sweep.py`, the sweep driver.
+
+**Model-side knob tried and rejected** (same 12-turn bench, 1080 MHz, session-12 defaults, greedy):
+
+| config | wall | decode | prefill | note |
+|---|---|---|---|---|
+| session-12 defaults (re-measured) | 159 s | 13.4 tok/s (median turn 13.07) | 384 tok/s | `logs/bench/20261112-202727-*s13-baseline-1080` |
+| `-ctk q8_0 -ctv q8_0` | 168 s | 12.6 tok/s (median turn 12.1) | 406 tok/s | `logs/bench/20261112-203047-*s13-kvq8-1080` |
+
+KV quantisation is a loss here: the bench's context tops out at ~3.3k tokens, so KV traffic is a
+small share of the per-token bytes while the dequantised attention path costs more. Same-config
+runs also spread 13.07 / 13.52 / 13.78 median across sessions, so treat anything under ~4% as
+noise. The default stays as session 12 left it; the 1080 MHz ceiling (87 GB/s against a 5.15 GB
+per-token read) is what bounds decode, which is why task A is the memory PLL and not the knobs.
+

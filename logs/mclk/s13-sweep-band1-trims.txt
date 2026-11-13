@@ -1,0 +1,58 @@
+0x101000 = 0x00400080: strap 0 -> ramcfg index 0 (BIT M xlat @0x4c42)
+retrain band 2 bank 2, FBPAs [0, 1, 2, 3, 4, 5]; LIVE
+    script 2: wr 98467c <- ffff0000
+    script 2: wr 984708 <- 00030550
+    script 2: wr 9a070c <- 00005353
+    script 2: wr 9006a0 <- 03030303
+    script 2: wr 9006a4 <- 03030303
+    script 2: wr 9046a0 <- 03030303
+    script 2: wr 9046a4 <- 03030303
+    script 2: wr 9086a0 <- 03030303
+    script 2: wr 9086a4 <- 03030303
+    script 2: cond [0x30] -> True (override)
+    script 2: wr 90c6a0 <- 03030303
+    script 2: wr 90c6a4 <- 03030303
+    script 2: cond [0x31] -> True (override)
+    script 2: wr 9106a0 <- 03030303
+    script 2: wr 9106a4 <- 03030303
+    script 2: wr 9146a0 <- 03030303
+    script 2: wr 9146a4 <- 03030303
+    script 2: wr 9846a8 <- 03030303
+    script 2: wr 9846ac <- 03030303
+    wr 9006a0 <- 12121212  patch (after the bank script)
+    wr 9006a4 <- 12121212  patch (after the bank script)
+    wr 9046a0 <- 12121212  patch (after the bank script)
+    wr 9046a4 <- 12121212  patch (after the bank script)
+    wr 9086a0 <- 12121212  patch (after the bank script)
+    wr 9086a4 <- 12121212  patch (after the bank script)
+    wr 90c6a0 <- 12121212  patch (after the bank script)
+    wr 90c6a4 <- 12121212  patch (after the bank script)
+    wr 9106a0 <- 12121212  patch (after the bank script)
+    wr 9106a4 <- 12121212  patch (after the bank script)
+    wr 9146a0 <- 12121212  patch (after the bank script)
+    wr 9146a4 <- 12121212  patch (after the bank script)
+    wr 9846a8 <- 0f0f0f0f  patch (after the bank script)
+    wr 9846ac <- 0f0f0f0f  patch (after the bank script)
+    wr 98467c <- fff10000  patch (after the bank script)
+    wr 984708 <- 00030002  patch (after the bank script)
+    wr 9a070c <- 00004d4d  patch (after the bank script)
+  [train]
+    wr 9a0910 <- a50e0000  train  (was 250c0000)
+    wr 9a0914 <- a50e0000  train  (was 250c0000)
+    wait 900974 & 0000000d == 00000000  FBPA0 training done (half partition: bit 1 ignored)
+    wait 904974 & 0000000f == 00000000  FBPA1 training done
+    wait 908974 & 0000000f == 00000000  FBPA2 training done
+    wait 90c974 & 0000000f == 00000000  FBPA3 training done
+    wait 910974 & 0000000f == 00000000  FBPA4 training done
+    wait 914974 & 0000000f == 00000000  FBPA5 training done
+      FBPA0 status a  trained delays 6a8=0f0f0f0f 6ac=0f0f0f0f
+      FBPA1 status a  trained delays 6a8=0f0f0f0f 6ac=0f0f0f0f
+      FBPA2 status a  trained delays 6a8=0f0f0f0f 6ac=0f0f0f0f
+      FBPA3 status a  trained delays 6a8=0f0f0f0f 6ac=0f0f0f0f
+      FBPA4 status a  trained delays 6a8=0f0f0f0f 6ac=0f0f0f0f
+      FBPA5 status a  trained delays 6a8=0f0f0f0f 6ac=0f0f0f0f
+      INCOMPLETE: training did not complete on FBPA [0, 1, 2, 3, 4, 5] (--soft, continuing)
+    wr 9a0830 <- 01272099    (was 00272099)
+    wr 9a0830 <- 00272099    (was 01272099)
+    wr 9a0910 <- 250c0000  train 07_02  (was 250e0000)
+    wr 9a0914 <- 250c0000  train 07_02  (was 250e0000)
