@@ -13,11 +13,15 @@ Two runtimes reach it through a libcuda/NVML shim over TinyGPU:
   gives it, and 200 ms/token since launches became asynchronous (was 529).
 * **llama.cpp** (via `shim/cudart` + `shim/cublas`): SmolLM2-135M Q4_0 at 61 tok/s
   generation / 447 tok/s prompt, and `test-backend-ops` 10,000+ cases with 0 failures.
+  **Gemma 4 E4B (QAT Q4_0) at 13.5 tok/s** with tool calling.
+
+**The memory is reclocked** from the 405 MHz boot clock to **1080 MHz** (31 -> 87 GB/s), the
+first Pascal memory reclock by an open driver (`pascal/mclk.py`; RESULTS.md section 10).
 
 [`bin/local-gpu`](localgpu/) brings the whole stack up with one command: card init if it is
 cold, the driver server, the right container, a resumable model download, an Ollama-compatible
 endpoint on `127.0.0.1:11434`, and a terminal chat. Full results: **[RESULTS.md](RESULTS.md)**;
-what is in flight: **[docs/handoffs/HANDOFF-SESSION9.md](docs/handoffs/HANDOFF-SESSION9.md)**.
+what is in flight: **[docs/handoffs/HANDOFF-TO-OPUS.md](docs/handoffs/HANDOFF-TO-OPUS.md)**.
 
 ```
 rung 0  transport + VBIOS POST from macOS + 11 GB VRAM   DONE

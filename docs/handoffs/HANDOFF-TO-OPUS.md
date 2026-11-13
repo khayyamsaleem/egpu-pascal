@@ -1,5 +1,70 @@
 HANDOFF — GTX 1080 Ti (GP102) bring-up over TinyGPU on a MacBook Air M1
-Rewritten 2026-11-12, end of session 10.  This file replaces the session-5
+Rewritten 2026-11-12, end of session 10; section 0 added at the end of session 11
+(same day, later).  READ SECTION 0 FIRST: it supersedes the clock numbers, the
+performance table and the task ranking in sections 2-4.  This file replaces the session-5
+
+=====================================================================
+0. SESSION 11 (2026-11-12, night): THE MEMORY IS RECLOCKED
+=====================================================================
+The GDDR5X now runs at 1080 MHz (was the 405 MHz boot clock): 87.3 GB/s read
+(was 31.1).  Gemma 4 E4B on llama.cpp decodes at 13.5 tok/s (was 6.83), and the
+12-turn bench is 159 s (was 304 s), all 12 turns byte-identical to the 405 MHz run.
+Full write-up and evidence: RESULTS.md section 10, logs/mclk/, commit 234b010.
+
+  pascal/mclk.py status | get | set <MHz> [--live]   the reclock (dry run without --live)
+  pascal/vbinit.py      the VBIOS init-script interpreter (rammap per-mode scripts)
+  pascal/memtest.py     full-VRAM GPU pattern test (+ --inject negative control,
+                        --loops soak, --hold retention); THE judge of a reclock
+  bin/local-gpu serve [--mclk N]   reclocks to N (default 1080, env LOCAL_GPU_MCLK)
+                        after bring-up, proves VRAM, steps down 810 -> 405 on failure
+
+Verified on this card: 405, 810, 1080, 1134 MHz pass (1134 also a 100-pass soak
+and a 30 s hold); 1188 and 1296 train but corrupt data; band 2 (1620) does not
+train.  Default 1080 = two 27 MHz steps below the highest pass.  Die 36 C idle.
+
+What made it work (do not re-derive): FBPA at 0x9a0000 = Kepler's 0x10f000;
+per-mode register banks selected by 0x9a065c (devinit programs only bank 0);
+the mode scripts gate FBPA3-5 on conditions with no table in this VBIOS
+(evaluate from which FBPAs answer); FBPA0's absent half never finishes training
+(ignore status bit 1 there); ramp in <= 54 MHz steps; MR3 bit 5 stays 1.
+
+Gotchas learned the hard way:
+  * After a FAILED reclock, never run GPU work: corrupted page tables / GPFIFO
+    made the card reset itself (PMC defaults, FB reads badf3000; no PCIe
+    re-enumeration).  Recovery = the cold path (devinit, fb), then reclock.
+  * A PRAMIN write+read spot check (vram_test.py) passes even when DRAM is broken:
+    PRAMIN goes through the 2.75 MB L2.  Only memtest.py counts.
+  * The user unplugged/replugged the enclosure once mid-session: the card came back
+    cold; a fresh TinyGPU server attaches to the new dext instance by itself.
+
+Where decode time goes now (NVPASCAL_PROF=1, 258 tokens): ~64 ms/token GPU time
+of ~74 ms -> GPU-bound.  Weight matvecs 55-68 GB/s of 87 available; ~900 launches
+per token, small kernels 13-20 us each at the 607 MHz SM clock; ~10 ms/token is
+host launch overhead (900 x ~12 us).  lm_head (Q6_K, 550 MB) is 8 ms/token.
+
+OPEN TASKS, RE-RANKED FOR TOK/S (supersedes section 4's ranking):
+  1. SM clock (607 MHz; spec 1480/1582).  Read-only so far: the Kepler GPCPLL at
+     0x137000 reads badf on GP102 -> the GPC clock is elsewhere (probably NAFLL);
+     NVVDD PWM 0x20340 = 0xa0 period, 0x20344 = 0x40 duty.  A GPC reclock may need a
+     VOLTAGE change: a wrong voltage write can damage hardware, unlike a clock write.
+     Ask the user before any write to the voltage PWM.  Start by finding the GPC
+     clock source and reading the VBIOS boot voltage / VF tables.
+  2. Host launch overhead (~14% of a token): batch launches per shimd message, or
+     implement CUDA-graph capture/replay in the shim (llama.cpp uses graphs when the
+     runtime supports them).
+  3. 1134 MHz instead of 1080 (+5% bandwidth) once a warm-card soak passes.
+  4. MAX patch 0004 (unchanged from section 4, item 1): it unblocks E4B on MAX but
+     int8 weights read 2x the bytes of llama.cpp's Q4_0, so it will not beat
+     llama.cpp on decode.
+  5. Items 3-5 of section 4 still stand (op-suite re-run, thinking-channel knob,
+     temperature op in shimd).
+
+Card state as handed over (session 11): warm, memory at 1080 MHz, serving
+gemma4-e4b on llama.cpp at 127.0.0.1:11434 (`bin/local-gpu status`).
+
+---- the session-10 text follows, unchanged ----
+
+This file replaces the session-5
 handoff entirely: the rung-4 FECS blocker it was built around has been closed
 for five sessions, and rungs 1-5 have all landed since.  Nothing here is
 stale-by-supersession — the session-5 file is kept only as history.

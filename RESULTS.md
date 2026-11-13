@@ -363,3 +363,67 @@ Known gaps:
 * Gemma 4 **E4B** needs 9.4 GB on the device even with host PLE, which doesn't fit.
 * Decode is launch-bound: ~700 launches per token at ~0.4 ms each.
 * `tanh` on 26.6 is still unpatched; only the nightly set has the std rebuild.
+
+## 10. Memory reclock: 405 -> 1080 MHz (session 11, 2026-11-12)
+
+**The GDDR5X runs at 1080 MHz instead of the 405 MHz boot clock: 87.3 GB/s read (was 31.1),
+and Gemma 4 E4B decodes at 13.5 tok/s (was 6.83) with byte-identical output.** No open driver
+had reclocked Pascal memory before; nouveau's `ramgp100.c` is init-only.
+
+How (`pascal/mclk.py`, `pascal/vbinit.py`, evidence in `logs/mclk/`):
+
+* GP102's FBPA broadcast block is Kepler's `0x10fXXX` moved to `0x9a0XXX` (per partition:
+  `0x900000 + i * 0x4000`). Proof: VBIOS timing entry 0's words sit at `0x9a0290..` exactly
+  where `gk104_ram_calc_gddr5` writes them, and nouveau's `nvkm_gddr5_calc` reproduces the
+  live MR0 (`0x25`), MR1, MR3, MR8. Only steps whose formula reproduces the boot state were
+  kept (MR7, `0x9a0824`, `0x9a0978`, `0x9a0ec4` do not, so they are left alone).
+* The piece nouveau never needed: **per-mode FBPA register banks**, write bank = `0x9a065c`
+  bits 7:4, active bank = bits 3:0 (`0x11 * rammap_11_11_0c`). Selecting bank 1 or 2 reads
+  back reset values in `0x9006a0`/`0x9846a8`/`0x98467c`; devinit only programs bank 0. The
+  VBIOS rammap header points at one init script per mode, run by `pascal/vbinit.py`.
+* Those scripts gate FBPA3 behind condition `0x30` and FBPA4/5 behind `0x31`, and this VBIOS
+  has **no legacy condition table** (BIT 'I' + 4 = 0; the PMU DEVINIT app evaluates them). With
+  every condition false (nouveau's behaviour), FBPA3-5 trained to saturated delays (`0x1f`)
+  and the GPU took an MMU PDE fault. Evaluating them from which partitions answer fixed it;
+  script 0 under the same rule writes exactly what DEVINIT left in bank 0 on all six FBPAs.
+* Sequence: bank program -> self-refresh in -> refpll post-divider / N -> band timings, MRs,
+  `0x9a065c` -> self-refresh out -> retrain (`0x9a0910/914`, wait `0x900974` per FBPA). The
+  refpll VCO stays 800..1620 MHz (VBIOS PLL type 0x0c), so everything here is "mode 1"; the
+  MPLL (mode 2, >1620 MHz) is not attempted.
+* FBPA0 is half-populated (1 GiB of 2): its absent half never finishes training (status bit 1,
+  delay register `0x6a8` saturated) and is ignored; the pattern test is the judge.
+
+| memory clock | read GB/s | write GB/s | VRAM test (9 GiB x 3 patterns) |
+|---|---|---|---|
+| 405 (boot, band 0) | 31.1 | 28.8 | pass |
+| 810 (P5, band 1) | 64.0 | 52.2 | pass, also straight from a cold boot |
+| **1080 (band 1, default)** | **87.3** | 66.0 | pass |
+| 1134 (band 1) | 92.0 | 66.9 | pass + 100-pass soak + 30 s retention hold |
+| 1188, 1296 (band 1) | — | — | train, but corrupt data (GPU MMU faults) |
+| 1620 (band 2 config) | — | — | does not train; GPU work afterwards reset the card |
+
+Jumps of more than ~54 MHz fail training (1620 -> 1296 did; 1242 -> 1296 did not), so
+`mclk.py set` ramps through 810 and then 54 MHz steps. `pascal/memtest.py` is a full-VRAM GPU
+pattern test with a bit-flip negative control (`--inject`); a PRAMIN spot check is **not**
+evidence, because PRAMIN goes through the 2.75 MB L2.
+
+`local-gpu` now reclocks to `--mclk` (default 1080) after bring-up, proves the VRAM with
+`memtest.py`, and steps down to 810, then 405, on failure; shimd reports the live clock.
+
+Gemma 4 E4B QAT Q4_0, llama.cpp, the 12-turn `bench_chat.py` script (logs/bench/):
+
+| | 405 MHz (session 10) | 1080 MHz |
+|---|---|---|
+| wall | 304 s | **159 s** |
+| decode | 6.83 tok/s | **13.5 tok/s** |
+| prefill | 264 tok/s | 375 tok/s |
+| TTFT median / max | 1.11 / 6.6 s | 0.7 / 5.0 s |
+| output | — | **12/12 turns byte-identical** to the 405 MHz run |
+
+Where decode time goes now (`NVPASCAL_PROF=1`, 258 tokens): ~64 ms/token of GPU time out of
+~74 ms, so it is GPU-bound, not bandwidth-bound. Weight matvecs reach 55-68 GB/s of the 87
+available (fused gate+up Q4_0 63 GB/s, lm_head Q6_K 8 ms/token at 68 GB/s), and ~900 launches
+per token include many 13-20 us small kernels at a 607 MHz SM clock. The SM clock is the next
+lever: the Kepler-style GPCPLL at `0x137000` reads `badf` on GP102 (the GPC clock is elsewhere,
+likely NAFLL), and the NVVDD PWM (`0x20340` period 0xa0, `0x20344` duty 0x40) means a GPC
+reclock may need a voltage change -- a different risk class from the memory clock.
