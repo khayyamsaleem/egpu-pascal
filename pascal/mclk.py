@@ -11,6 +11,7 @@ card reads back, and `status` is the negative control before and after.
   set <MHz> [--live]  reclock along the refpll path (<= 1620 MHz); without --live, print the
                       writes only. The card must be idle: no shimd, no client. Ramps through
                       810 and then 54 MHz steps (big jumps fail training); --jump disables that.
+                      --mode2 forces the mempll path (see below), which does not work on this card.
   retrain <MHz>       re-program the active band's bank + re-run the training tail at the current
                       clock (no clock change): the cheap way to test PHY settings.
 
@@ -27,6 +28,10 @@ Measured on this card (logs/mclk/, pascal/memtest.py, 9 GiB x 3 patterns unless 
   with or without a ramp: the DRAM delays do train but FBPA status bits 1|3 stay set, and the
   first GPU work after it hangs with GP_GET garbage (PBDMA INTR 0x20000000).  Its bank script's
   trims (0x03 lanes / Vref 0x5353) and the band-2 timing (CL 20) are the difference from band 1.
+  Mode 2 (the mempll at 0x132004, --mode2) is implemented here the way nouveau does it and its PLL
+  math hits every target within 25 kHz, but it fails the same way AT 1080 MHz, where mode 1 trains
+  clean: training incomplete on all six FBPAs, then the FIFO hangs.  So the register-level mempll
+  configuration is not what the DRAM needs -- 0x132000 may not be a memory PLL on GP102 at all.
 
 Usage: ~/.venvs/tinygpu/bin/python pascal/mclk.py status
 """
@@ -164,14 +169,23 @@ def mclk_khz(regs):
     out = dict(src=src, refpll=(m, n, p, fn), refpll_vco_khz=ref, refpll_out_khz=ref / p if p else 0)
     mp = regs[0x132004]
     out["mpll"] = (mp & 0xff, (mp >> 8) & 0xff, ((mp >> 28) & 0x7) + 1, bool(regs[0x132000] & 1))
+    # mempll output (mode 2): read_pll(0x132000) = the refpll output * N / (M * P), with fN
+    # fixed at 0xf000 -- and (u16)(0xf000 + 4096) truncates to 0, so there is no fractional term.
+    mm, mn = mp & 0xff, (mp >> 8) & 0xff
+    mp_p = 2 if (mp & 0x10000000) else 1
+    out["mempll_out_khz"] = (ref / p if p else 0) * mn / (mm * mp_p) if mm else 0
     return out
 
 
 def live_mclk_mhz(c):
-    """Current memory clock in MHz from the registers (refpll path only; 0 if not on it)."""
+    """Current memory clock in MHz from the registers (0 if neither PLL drives it)."""
     r = {a: c.rd(a) for a in (0x1373f4, 0x132024, 0x132030, 0x132004, 0x132000)}
     m = mclk_khz(r)
-    return round(m["refpll_out_khz"] / 1000) if m["src"] == 1 else 0
+    if m["src"] == 1:
+        return round(m["refpll_out_khz"] / 1000)
+    if m["src"] == 2:
+        return round(m["mempll_out_khz"] / 1000)
+    return 0
 
 
 def dump_regs(regs, prev=None):
@@ -251,6 +265,91 @@ def refpll_coef(mhz, cur):
     N = int(ntot) - 1
     fN = (round((ntot - N) * 8192) - 4096) & 0xffff
     return (P << 16) | (N << 8) | 1, fN
+
+
+# ----------------------------------------------------------------- mode 2: the mempll
+# Above the refpll's VCO max (1620 MHz here) the memory clock comes from the MPLL instead
+# (0x132000 control, 0x132004 coefficients) driven by a lower refpll "reference" frequency.
+# nouveau picks the mode from the frequency alone (`ram->mode = (next->freq >
+# fuc->refpll.vco1.max_freq) ? 2 : 1`) and then runs the mode-2 half of r1373f4_init/_fini plus
+# the mode-2 branches inside gk104_ram_calc_gddr5; none of that is in the mode-1 path above.
+def pll_out_khz(fn, m, n, p, clk_khz):
+    """gk104_calc_pll_output, integer C semantics: ((clk*N) + (((u16)(fN + 4096) * clk) >> 13))
+    / (M*P).  fN = 0xf000 truncates to 0 in that u16, so the mempll's multiplier is exactly N."""
+    return ((clk_khz * n) + ((((fn + 4096) & 0xffff) * clk_khz) >> 13)) // (m * p)
+
+
+def cdiv(a, b):
+    """C integer division: truncates toward zero, which the hiclk search needs for negative
+    best_err values (Python's // floors instead)."""
+    q = abs(a) // abs(b)
+    return q if (a < 0) == (b < 0) else -q
+
+
+def hiclk_coef(target_khz, crystal_khz=REFCLK_KHZ):
+    """nouveau gk104_pll_calc_hiclk: choose a refpll reference frequency (P1 5..7, N1 0x25..0x2b,
+    M1 = M2 = P2 = 1) and the mempll multiplier N2 so its output lands on target_khz.  Returns
+    (refpll_out_khz, N1, fN1, M1, P1, N2, M2, P2)."""
+    best_err, upper = target_khz, False
+    M1 = M2 = P2 = 1
+    N1 = P1 = 1
+    N2 = target_khz // (crystal_khz * 0x25 // 7)
+    for p_ref in (7, 6, 5):
+        for n_ref in range(0x25, 0x2c):
+            cur_clk = pll_out_khz(0, 1, n_ref, p_ref, crystal_khz)
+            n = target_khz // cur_clk
+            err = target_khz - pll_out_khz(0xf000, 1, n, 1, cur_clk)
+            if err < best_err:
+                best_err, N2, N1, P1, upper = err, n, n_ref, p_ref, False
+            n += 1
+            err = pll_out_khz(0xf000, 1, n, 1, cur_clk) - target_khz
+            if err < best_err:
+                best_err, N2, N1, P1, upper = err, n, n_ref, p_ref, True
+    fN1 = cdiv(cdiv(best_err, N2) * P2 * (P1 * M1) << 13, crystal_khz) & 0xffff
+    if upper:
+        fN1 = (1 - fN1) & 0xffff
+    return pll_out_khz(fN1, M1, N1, P1, crystal_khz), N1, fN1, M1, P1, N2, M2, P2
+
+
+def mode2_clock(s, rc, ref_out, n1, fn1, m1, p1, n2, m2, p2):
+    """r1373f4_init and r1373f4_fini with `ram->mode == 2`, in nouveau's order (init, then the
+    caller's other mode-2 writes, then fini)."""
+    rcoef = (p1 << 16) | (n1 << 8) | m1
+    mcoef = ((p2 - 1) << 28) | (n2 << 8) | m2
+    print("  [clock] mode 2 (mempll): refpll -> %06x fN1 %04x (%d kHz), mempll coef -> %08x "
+          "= %d kHz" % (rcoef, fn1, ref_out, mcoef, pll_out_khz(0xf000, m2, n2, p2, ref_out)))
+    s.mask(0x1373f4, 0, 0x00010010)
+    s.mask(0x1373f4, 0x00000003, 0, "mclk source off")
+    s.mask(0x1373f4, 0x00000010, 0)
+    if s.rd(0x132024) != rcoef or (s.rd(0x132034) & 0xffff) != fn1:
+        s.mask(0x132000, 0x00000001, 0)
+        s.mask(0x132020, 0x00000001, 0, "refpll off")
+        s.wr(0x137320, 0)
+        s.mask(0x132030, 0xffff0000, fn1 << 16)
+        s.mask(0x132034, 0x0000ffff, fn1)
+        s.wr(0x132024, rcoef, "refpll coefficients (mode-2 reference)")
+        s.mask(0x132028, 0x00080000, 0x00080000)
+        s.mask(0x132020, 0x00000001, 1, "refpll on")
+        s.wait(0x137390, 0x00020000, 0x00020000, why="refpll lock")
+        s.mask(0x132028, 0x00080000, 0)
+    s.mask(0x1373f4, 0x00010000, 0)
+    s.mask(0x132000, 0x80000000, 0x80000000)
+    s.mask(0x132000, 0x00000001, 0)
+    s.mask(0x132004, 0x103fffff, mcoef, "mempll coefficients")
+    s.mask(0x132000, 0x00000001, 1)
+    s.wait(0x137390, 0x00000002, 0x00000002, why="mempll lock")
+    s.mask(0x1373f4, 0, 0x00001100)
+    s.mask(0x1373f4, 0, 0x00000010)
+
+
+def mode2_fini(s, rc, fb):
+    """r1373f4_fini with `ram->mode == 2`: source = mempll, drop the 0x1100 bits, clear
+    0x1373f0 bit 0 (its bit 1 was set before init), and the 0x9a0800 clock-select nibble."""
+    s.mask(0x1373ec, 0x00030000, rc["r03_30"] << 16)
+    s.mask(0x1373f0, 0x00000001, 0)
+    s.mask(0x1373f4, 0x00000003, 0x00000002, "mclk source = mempll")
+    s.mask(0x1373f4, 0x00001100, 0)
+    s.mask(fb(0x800), 0x00000030, (rc["r03_c0"] ^ rc["r03_30"]) << 4)
 
 
 class Seq:
@@ -386,19 +485,27 @@ def retrain(c, v, idx, mhz, live, patches=(), soft=False):
     train_tail(s, fbpas, rc, rm, soft=soft)
 
 
-def reclock(c, v, idx, mhz, live, patches=(), soft=False):
+def reclock(c, v, idx, mhz, live, patches=(), soft=False, mode2=False, from_mode=1):
     regs = snapshot(c)
     cur = mclk_khz(regs)
-    if cur["src"] != 1 or cur["mpll"][3]:
-        raise SystemExit("not on the refpll path (0x1373f4 src %d, MPLL on %s): refusing" % (cur["src"], cur["mpll"][3]))
-    if mhz > 1620:
-        raise SystemExit("%d MHz needs the MPLL (mode 2): not implemented" % mhz)
+    from_mode = cur["src"] if cur["src"] in (1, 2) else from_mode
+    mode = 2 if (mode2 or mhz > 1620) else 1
     band, rm, rc, tm = target_config(v, idx, mhz)
     coef, fn = refpll_coef(mhz, cur["refpll"])
     fbpas = [i for i in range(12) if c.rd(0x90020c + i * 0x4000) >> 16 != 0xbadf]
     bank = rm["m11_0c"]
-    print("target %d MHz: rammap band %d (%d..%d), timing %d, bank %d, refpll coef %08x, FBPAs %s; %s"
-          % (mhz, band, rm["min"], rm["max"], rc["timing"], bank, coef, fbpas, "LIVE" if live else "DRY RUN"))
+    if cur["src"] not in (1, 2):
+        raise SystemExit("0x1373f4 mclk source is %d (neither PLL): refusing" % cur["src"])
+    if mode == 2:
+        ref_out, n1, fn1, m1, p1, n2, m2, p2 = hiclk_coef(mhz * 1000)
+    else:
+        ref_out = n1 = fn1 = m1 = p1 = n2 = m2 = p2 = 0
+    print("target %d MHz (mode %d%s, from mode %d): rammap band %d (%d..%d), timing %d, bank %d, "
+          "FBPAs %s; %s" % (mhz, mode, ", forced" if mode2 and mhz <= 1620 else "", from_mode, band,
+                            rm["min"], rm["max"], rc["timing"], bank, fbpas,
+                            "LIVE" if live else "DRY RUN"))
+    if mode == 1:
+        print("  refpll coef %08x" % coef)
     print("  ramcfg %s" % {k: x for k, x in rc.items()})
     print("  timing WL %d CL %d WR %d, words %s" % (tm["WL"], tm["CL"], tm["WR"], " ".join("%08x" % w for w in tm["w"])))
     s = Seq(c, live)
@@ -427,33 +534,69 @@ def reclock(c, v, idx, mhz, live, patches=(), soft=False):
     s.wr(fb(0x69c), 0)
     s.mask(0x132040, 0x00010000, 0)
 
-    # 2. the clock (r1373f4_init / _fini, from = 1, mode = 1)
-    print("  [clock] refpll %08x -> %08x" % (regs[0x132024], coef))
-    s.mask(0x1373f4, 0, 0x00010010)
-    s.mask(0x1373f4, 0x00000003, 0, "mclk source off")
-    s.mask(0x1373f4, 0x00000010, 0)
-    if s.rd(0x132024) != coef or (s.rd(0x132034) & 0xffff) != fn:
-        s.mask(0x132000, 1, 0)
-        s.mask(0x132020, 1, 0, "refpll off")
-        s.wr(0x137320, 0)
-        s.mask(0x132030, 0xffff0000, fn << 16)
-        s.mask(0x132034, 0x0000ffff, fn)
-        s.wr(0x132024, coef, "refpll coefficients")
-        s.mask(0x132028, 0x00080000, 0x00080000)
-        s.mask(0x132020, 1, 1, "refpll on")
-        s.wait(0x137390, 0x00020000, 0x00020000, why="refpll lock")
-        s.mask(0x132028, 0x00080000, 0)
-    s.mask(0x1373f4, 0, 0x00010100)
-    s.mask(0x1373f4, 0, 0x00000010)
-    s.mask(0x1373ec, 0x00030000, rc["r03_30"] << 16)
-    s.mask(0x1373f0, 0x00000002, 0)
-    s.mask(0x1373f4, 0x00000003, 0x00000001, "mclk source = refpll")
-    s.mask(0x1373f4, 0x00010000, 0)
-    s.mask(fb(0x800), 0x00000030, (rc["r03_c0"] ^ rc["r03_30"]) << 4)
+    # 2. the clock (r1373f4_init / _fini)
+    def refpll_on():
+        s.mask(0x1373f4, 0x00000003, 0, "mclk source off")
+        s.mask(0x1373f4, 0x00000010, 0)
+        if s.rd(0x132024) != coef or (s.rd(0x132034) & 0xffff) != fn:
+            s.mask(0x132000, 1, 0)
+            s.mask(0x132020, 1, 0, "refpll off")
+            s.wr(0x137320, 0)
+            s.mask(0x132030, 0xffff0000, fn << 16)
+            s.mask(0x132034, 0x0000ffff, fn)
+            s.wr(0x132024, coef, "refpll coefficients")
+            s.mask(0x132028, 0x00080000, 0x00080000)
+            s.mask(0x132020, 1, 1, "refpll on")
+            s.wait(0x137390, 0x00020000, 0x00020000, why="refpll lock")
+            s.mask(0x132028, 0x00080000, 0)
+
+    if mode == 1 and from_mode == 2:
+        # nouveau's `ram->from == 2 && ram->mode != 2` branch: leave the mempll and re-init the
+        # refpll (the way back down, so a mode-2 attempt is recoverable in place).
+        print("  [clock] mode 1, leaving mode 2: 0x9a0808/0x9a0200/0x9a0830 + refpll re-init")
+        s.mask(fb(0x808), 0x00080000, 0)
+        s.mask(fb(0x200), 0x18008000, 0x00008000)
+        s.mask(fb(0x800), 0, 0x00000004)
+        s.mask(fb(0x830), 0x00008000, 0x01040010)
+        s.mask(fb(0x830), 0x01000000, 0)
+        s.mask(0x1373f4, 0, 0x00010010)
+        refpll_on()
+        s.mask(0x1373f0, 0x00000002, 0x00000001)
+        s.mask(0x1373ec, 0x00030000, rc["r03_30"] << 16)
+        s.mask(0x1373f4, 0x00000003, 0x00000001, "mclk source = refpll")
+        s.mask(0x1373f4, 0x00010000, 0)
+        s.mask(fb(0x800), 0x00000030, (rc["r03_c0"] ^ rc["r03_30"]) << 4)
+        s.mask(fb(0x830), 0x00c00000, 0x00240001)
+    elif mode == 1:
+        print("  [clock] refpll %08x -> %08x" % (regs[0x132024], coef))
+        s.mask(0x1373f4, 0, 0x00010010)
+        refpll_on()
+        s.mask(0x1373f4, 0, 0x00010100)
+        s.mask(0x1373f4, 0, 0x00000010)
+        s.mask(0x1373ec, 0x00030000, rc["r03_30"] << 16)
+        s.mask(0x1373f0, 0x00000002, 0)
+        s.mask(0x1373f4, 0x00000003, 0x00000001, "mclk source = refpll")
+        s.mask(0x1373f4, 0x00010000, 0)
+        s.mask(fb(0x800), 0x00000030, (rc["r03_c0"] ^ rc["r03_30"]) << 4)
+    else:
+        print("  [clock] mode 2: nothing here -- nouveau programs the mempll with the band "
+              "registers, in [config] below")
 
     # 3. configuration for the band (the subset whose formula reproduces the boot state)
     print("  [config] band %d settings and timings" % band)
-    if rc["r07_40"]:
+    if mode == 2:
+        # gk104_ram_calc_gddr5's mode-2 branches, then r1373f4_init/_fini with the mempll.
+        # from == 2 (already on the mempll) is the shorter variant: clear 0x9a0800 bit 2, restart it.
+        s.mask(fb(0x800), 0x00000004, 0, "mode 2: clear 0x9a0800 bit 2")
+        if from_mode != 2:
+            s.mask(0x1373f0, 0, 0x00000002, "mode 2: 0x1373f0 |= 2")
+            s.mask(fb(0x830), 0x00800001, 0x00408010, "mode 2: 0x9a0830")
+        mode2_clock(s, rc, ref_out, n1, fn1, m1, p1, n2, m2, p2)
+        mode2_fini(s, rc, fb)
+        if from_mode != 2:
+            s.mask(fb(0x808), 0, 0x00080000, "mode 2: 0x9a0808 |= 0x80000")
+            s.mask(fb(0x200), 0x00808000, 0x00800000, "mode 2: 0x9a0200")
+    if rc["r07_40"] and mode != 2:      # nouveau guards this with `if (ram->mode != 2) /*XXX*/`
         s.mask(fb(0x670), 0x80000000, 0x80000000)
     s.wr(fb(0x65c), 0x11 * rm["m11_0c"], "active bank")
     s.wr(fb(0x6b8), 0x01010101 * rc["r09"])
@@ -462,8 +605,9 @@ def reclock(c, v, idx, mhz, live, patches=(), soft=False):
         s.wr(fb(0x698), 0x01010101 * rc["r04"]); s.wr(fb(0x69c), 0x01010101 * rc["r04"])
     elif not rc["r07_08"]:
         s.wr(fb(0x698), 0); s.wr(fb(0x69c), 0)
-    s.mask(fb(0x694), 0xff00ff00, 0x01000100 * rc["r04"])
-    s.mask(fb(0x60c), 0x00000080, 0)
+    if mode != 2:                      # nouveau: `if (ram->mode != 2) { ram_nuke(0x10f694); ... }`
+        s.mask(fb(0x694), 0xff00ff00, 0x01000100 * rc["r04"])
+    s.mask(fb(0x60c), 0x00000080, 0x80 if (mode == 2 and rc["r08_10"]) else 0)
     s.mask(fb(0x200), 0x00001000, 0 if rc["r01_08"] else 0x1000)
     if s.rd(fb(0x670)) & 0x80000000:
         time.sleep(10e-6)
@@ -559,9 +703,11 @@ def main():
     if cmd == "set":
         mhz = int(sys.argv[2])
         live = "--live" in sys.argv
+        mode2 = "--mode2" in sys.argv
         # Big jumps fail training (1620 -> 1296 did; 1242 -> 1296 did not): ramp in <= 54 MHz
         # steps of 27 MHz multiples, retraining at each, unless --jump.
         cur = live_mclk_mhz(c)
+        mode = 2 if (mode2 or mhz > 1620) else 1
         steps = [mhz]
         if live and "--jump" not in sys.argv and cur:
             steps = []
@@ -571,7 +717,8 @@ def main():
             steps += [f for f in range(cur + sgn * 54, mhz, sgn * 54)] + ([mhz] if mhz != cur or not steps else [])
             print("ramping %d -> %d MHz via %s" % (live_mclk_mhz(c), mhz, steps))
         for f in steps:
-            reclock(c, v, idx, f, live=live, patches=cli_patches(sys.argv), soft="--soft" in sys.argv)
+            reclock(c, v, idx, f, live=live, patches=cli_patches(sys.argv), soft="--soft" in sys.argv,
+                    mode2=(mode == 2))
         return 0
     print("unknown command %r" % cmd)
     return 2

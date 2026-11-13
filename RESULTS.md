@@ -493,9 +493,31 @@ the fetch, not the engine.
 picks the *clock source* by frequency -- `ramgk104.c`: `ram->mode = (next->freq >
 fuc->refpll.vco1.max_freq) ? 2 : 1`, i.e. mode 2 (MPLL at 0x132004) starts only above the refpll
 VCO max of 1620 MHz, and mode 2 also flips `0x1373f4 |= 0x1100`, `0x1373f0 |= 2` and the
-0x9a0830/0x9a0808/0x9a0200 bits `mclk.py` never writes. Until that path is ported, memory stays
-where session 12 left it; the checks above exist so the port is the next thing tried instead of
-the 0x9a04xx/trim theories.
+0x9a0830/0x9a0808/0x9a0200 bits `mclk.py` never writes.
+
+**Mode 2 was then ported and it fails too -- at a clock that works in mode 1.** `mclk.py` now
+implements the whole mode-2 path (nouveau's `gk104_pll_calc_hiclk`, `r1373f4_init`/`_fini`'s
+mode-2 half, the mode-2 branches of `gk104_ram_calc_gddr5`, the `from == 2` way back down, and a
+`src == 2` read-back; `--mode2` forces it). Its PLL math hits every target within 25 kHz. Then
+`mclk.py set 1080 --live --mode2` -- band 1, the configuration that trains cleanly at 87.4 GB/s in
+mode 1 -- programs as intended (refpll 0x072801 = 154.287 MHz as the reference, mempll 0x00000701,
+`0x1373f4` = 0x12 = source mempll, read-back 1080.0 MHz) and **training does not complete on any
+FBPA**, after which the first GPU work hangs exactly as band 2 does (`GP_GET` garbage, FIFO_INTR
+0x20000000, PBDMA INTR bit 24). So the register-level mode-2 configuration is not what the DRAM
+needs: either the mempll is not the memory clock source on GP102, or its input/enable/route
+differs from nouveau's Kepler-era model -- note the read-back formula (`clk/gk104.c read_pll`
+0x132000: `refpll_out * N / (M * P)`, no fractional term because `(u16)(0xf000 + 4096)` truncates
+to 0) agrees with our intent, so it is not a measurement either.
+
+The way back down is implemented and verified (`set 1080 --live` from mode 2 runs nouveau's
+`from == 2 && mode != 2` branch, lands on the refpll and takes the 9 GiB test again: 87.4 GB/s,
+0 bad words). Next thing to try, in order: (1) measure the *actual* memory clock instead of
+trusting the PLL registers -- nvgpu's clock counters are the only host-readable clock source
+(`trim_gpc_bcast_clk_cntr_ncgpcclk_cfg/cnt` 0x132924/0x132928, sys 0x1373b0/0x1373b4, ltc
+0x1373c0/0x1373c4, source gpc2clk = 0x70000000), read twice with a known host delay, so a mode-2
+attempt can be judged without running GPU work; (2) only then re-read `r1373f4_init`'s mempll
+enable/input against `clk_gp106.c`/`clk_fll.c`/`clk_vin.c` (the GP106 code is the nearest
+discrete-Pascal one nvgpu still has). Do not re-try the 0x9a04xx registers or the trim sweep.
 
 **Operational, learned twice today:** after a band-2 excursion the startup check at 1080 fails
 *immediately after a down-ramp* from 1350 (local-gpu stepped down to 810 on its own), and passes

@@ -26,7 +26,15 @@ next VBIOS band properly") does not work, and the reasons below are measured, no
     rammapEp v0x11 layout shows DEVINIT/the PMU already leave BAND 2's values in every one of
     them at boot; (3) the PHY trims -- 10 combos at 1350 (logs/mclk/s13-sweep-*, driver
     logs/mclk/s13-trim-sweep.py) make training complete in none, and those registers do not read
-    back what the script writes (0x9846a8, 0x9a070c), so the PMU/training engine owns them.
+    back what the script writes (0x9846a8, 0x9a070c), so the PMU/training engine owns them;
+    (4) THE MEMPLL (mode 2) ITSELF.  It is now implemented in mclk.py (hiclk_coef, mode2_clock,
+    mode2_fini, the mode-2 branches of reclock, the from == 2 return path, a src == 2 read-back,
+    --mode2) and its PLL math hits targets within 25 kHz, but `set 1080 --live --mode2` -- mode 2
+    at a clock that trains cleanly in mode 1 -- reads back as intended (source 2, refpll 0x072801
+    = 154.287 MHz, mempll 0x00000701, 1080.0 MHz) and STILL fails training on all six FBPAs, then
+    hangs the first GPU work with GP_GET garbage / FIFO_INTR 0x20000000.  So band 2 is not
+    reachable by switching the clock source to the mempll the way Kepler does; the open question
+    is whether 0x132000 is a memory PLL on GP102 at all, and what its input/enable really are.
 
 RECOVERY, learned twice today: after a band-2 excursion the 1080 check fails right after the
 down-ramp and passes again after cycling the clock -- `mclk.py set 810 --live` then
@@ -39,27 +47,29 @@ New tooling: `mclk.py retrain <MHz> --live --patch=ADDR:VAL[,...] [--soft]` (ext
 the band script's trims, before training; report instead of abort) + the sweep driver.
 
 OPEN TASKS, RE-RANKED AGAIN (supersedes the session-12 A/B/C list further down):
-  A. Mode 2 = the mempll (0x132004), now the only route up.  nouveau picks the clock source by
-     frequency alone (`ramgk104.c`: mode 2 only above the refpll VCO max, 1620 here), so bands
-     2/3 above 1620 need: `gk104_pll_calc_hiclk`'s refpll reference + mempll coefficients,
-     r1373f4_init/_fini's mode-2 branch (0x1373f4 |= 0x1100 then |= 0x10; 0x132004 =
-     (x & ~0x103fffff) | ((P2-1)<<28 | N2<<8 | M2); 0x137390 bit 1 lock; source 2), and the
-     mode-2-only writes in gk104_ram_calc_gddr5 (0x9a0800 &= ~4, 0x1373f0 |= 2, 0x9a0830 =
-     (x & ~0x00800001) | 0x00408010, 0x9a0808 |= 0x80000, 0x9a0200 = (x & ~0x00808000) |
-     0x00800000, and no 0x9a0694 write).  Addresses 0x10fXXX -> 0x9a0XXX; read the result as
-     clk/gk104.c read_mem does (src 2 -> read_pll(0x132000)).  First target 1674; expect to need
-     the two-phase transition gk104_ram_prog uses (prog_0(1000) then prog_0(target)).  No voltage
-     change; a failed attempt costs the recovery above, not hardware.  Reference facts:
-     docs/reference/README.md ("How the memory clock is selected on this chip").
+  A. Memory above 1134 MHz is now blocked on ONE question: what clock does the DRAM actually get?
+     Everything reachable by register inspection has been tried (see RULED OUT above).  0x132000
+     may not even be a memory PLL on GP102 -- on Pascal nvgpu programs the GPC clock through an
+     FLL/ADC (clk_fll.c/clk_vin.c) and sends the tables to PMU firmware.  Next step, in order:
+     (1) make the actual clock measurable without running GPU work -- read nvgpu's clock counters
+     twice with a known host delay (trim_gpc_bcast_clk_cntr_ncgpcclk_cfg/cnt 0x132924/0x132928,
+     sys 0x1373b0/0x1373b4, ltc 0x1373c0/0x1373c4; source gpc2clk = 0x70000000) at 405/810/1080
+     in mode 1 first, to find which counter (if any) tracks the memory clock;
+     (2) then read the nearest discrete-Pascal clock code nvgpu still carries (gp106 clk_gp106.c,
+     clk_fll.c, clk_vin.c, hw_trim_gp106.h) for how the memory clock is sourced, and compare its
+     enable/input path with r1373f4_init's mempll half; only then touch the card again.
+     Voltage is still untouched and still needs the user's explicit OK.
   B. Launch path: drop the per-launch WAIT_FOR_IDLE (~5-7%).  Needs real grid serialization: the
      QMD's ACQUIRE/RELEASE semaphore fields (tools/nvclass/clc1c0qmd.h, already parsed by
      compute.py's Qmd) so grid N+1 waits on grid N's release.  The earlier attempt failed because
      the acquire never blocked (the semaphore "went backwards"), which is an encoding question to
-     check against the header, not proof the hardware cannot do it.
+     check against the header, not proof the hardware cannot do it.  This is now the best
+     remaining tok/s lever that does not depend on the memory question.
   C. SM clock via the FLL (NAFLL) + voltage: what NVIDIA's PMU firmware does; hard, and a voltage
      write needs the user's explicit OK.
-  D. Model-side, no hardware: KV cache quantisation and requantising the Q6_K output tensor
-     (~170 MB/token less, ~+3%).  Measured this session: see RESULTS.md section 12 / logs/bench/.
+  D. Model-side, no hardware: KV cache q8_0 was measured and REJECTED this session (168 s /
+     12.6 tok/s vs 159 s / 13.4 tok/s) -- see RESULTS.md section 12.  Requantising the Q6_K output
+     tensor is still untried (~170 MB/token less, ~+3%, i.e. inside this card's run-to-run noise).
 
 =====================================================================
 SESSION 11-12 text follows, unchanged (its ranking is superseded by the list above)
