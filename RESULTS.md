@@ -991,3 +991,24 @@ configuration measured, and the reason is the quantization", not "llama.cpp is a
 is visible only client-side: 18 s and 35 s of TTFT were seen while the server's own `prompt_ms`
 stayed at 272 ms. Warm up once and discard that request, and do not measure while a model download
 is saturating the container.
+
+### The other axis: E4B against E2B, same runtime and harness
+
+Same protocol as the table above -- llama.cpp, `LOCAL_GPU_PLAIN=1`, context 8192, same client,
+same 96-token budget -- so only the model changes:
+
+| Gemma 4 on llama.cpp, Q4_0 | weights per token | decode tok/s | prefill tok/s |
+|---|---|---|---|
+| E4B (the default, ~7.5B params) | 5.15 GB | 12.29 | 524 |
+| E2B (~5B params) | 3.35 GB | **17.98** | **1156** |
+
+E2B is 1.46x faster on decode and 2.2x on prefill, and the byte ratio (5.15 / 3.35 = 1.54)
+predicts the decode gap almost exactly: both models move 60-63 GB/s of weights, so on this card
+decode speed tracks weight bytes. The larger model is therefore not the faster one -- E4B is the
+default because it is the more capable model (tool calling, vision), not the quicker one.
+
+Two caveats on that table. E4B's `-ot` embedding-offload flag is dropped by `LOCAL_GPU_PLAIN`, so
+its prefill here is below the pp512 840 measured with the flag on. And E4B's *serving* config (64K
+context, n-gram speculation on) measured 13.3 tok/s on this same prompt, 8% above the plain number
+above, while the 12-turn chat bench showed speculation buying nothing at all (section 16) -- this
+answer's repeated structure is what a draft model feeds on.
