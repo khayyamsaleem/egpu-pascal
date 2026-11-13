@@ -7,8 +7,13 @@ Standard library only.
 With tools on (`local-gpu chat --tools`) the model gets a small, explicit tool set it can call in
 a loop: read-only tools run immediately, anything that writes or runs a command asks first unless
 `--yes` was given.  File paths are confined to `--root` (default: the working directory).
+
+Tools: web_search (the self-hosted SearXNG first -- LOCAL_GPU_SEARXNG_URL, or
+LOCAL_GPU_SEARXNG_SSH for cherryblossom's unpublished instance -- then Bing RSS, DuckDuckGo lite,
+Wikipedia), fetch_url (live, with a Wayback fallback that says it is a snapshot), get_weather,
+list_files, read_file, write_file, run_command.
 """
-import json, os, subprocess, sys, time, urllib.request
+import html, json, os, re, subprocess, sys, time, urllib.parse, urllib.request
 
 DIM, RESET = ("\033[2m", "\033[0m") if sys.stdout.isatty() else ("", "")
 MAX_ITER = 8                                   # tool round trips per turn
@@ -20,6 +25,14 @@ SYSTEM_WITH_TOOLS = (
     "instead of inventing one. Keep answers short and state assumptions.")
 
 TOOLS = [
+    {"type": "function", "function": {
+        "name": "web_search", "description": "Search the web; returns titles, URLs and snippets",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string"}, "n": {"type": "integer"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "fetch_url", "description": "Fetch a URL and return its text (falls back to the Wayback copy)",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"}, "max_chars": {"type": "integer"}}, "required": ["url"]}}},
     {"type": "function", "function": {
         "name": "get_weather", "description": "Current weather for a city (offline demo tool)",
         "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
@@ -62,9 +75,122 @@ def _confirm(what, auto_yes):
         return False
 
 
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/124.0 Safari/537.36")
+# The self-hosted SearXNG behind `web_search`: either a directly reachable base URL, or
+# "ssh-host|docker-ip:port" for the one-hop ssh route (cherryblossom's instance publishes no port).
+SEARXNG_URL = os.environ.get("LOCAL_GPU_SEARXNG_URL", "")
+SEARXNG_SSH = os.environ.get("LOCAL_GPU_SEARXNG_SSH", "root@cherryblossom|172.17.0.19:8080")
+
+
+def _get(url, timeout=25):
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def _text(h):
+    """HTML -> readable text (drop scripts/styles/head, tags, entities, runs of blank lines)."""
+    h = re.sub(r"(?is)<(script|style|noscript|svg|head|template)[^>]*>.*?</\1>", " ", h)
+    h = html.unescape(re.sub(r"(?s)<[^>]+>", " ", h))
+    return re.sub(r"\n\s*\n\s*\n+", "\n\n", re.sub(r"[ \t\r\f\v]+", " ", h)).strip()
+
+
+def _searxng(q, n=5):
+    """The user's own SearXNG (cherryblossom-searxng-1), which is on a docker network with no
+    published port, so the default route is a one-hop ssh + curl.  Point LOCAL_GPU_SEARXNG_URL at
+    a directly reachable instance instead (published port, tailscale serve, ...) when there is one."""
+    path = "/search?q=%s&format=json" % urllib.parse.quote(q, safe="")
+    if SEARXNG_URL:
+        j = json.loads(_get(SEARXNG_URL.rstrip("/") + path))
+    else:
+        host, _, addr = SEARXNG_SSH.partition("|")
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
+                            "curl -s -m 20 'http://%s%s'" % (addr, path)],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode or not (r.stdout or "").strip().startswith("{"):
+            raise RuntimeError("searxng via %s: rc=%s %s" % (host, r.returncode, (r.stderr or "")[:120]))
+        j = json.loads(r.stdout)
+    return [(x.get("title", ""), x.get("url", ""), re.sub(r"\s+", " ", x.get("content") or "")[:300])
+            for x in (j.get("results") or [])]
+
+
+def web_search(query, n=5):
+    """Search: the user's SearXNG first (meta-search, self-hosted), then keyless fallbacks --
+    Bing's RSS endpoint, DuckDuckGo lite, Wikipedia's API.  Says which backend answered."""
+    def bing(q):
+        out = []
+        for it in re.findall(r"<item>(.*?)</item>",
+                             _get("https://www.bing.com/search?format=rss&q=" + urllib.parse.quote(q)), re.S):
+            t = re.search(r"<title>(.*?)</title>", it, re.S)
+            l = re.search(r"<link>(.*?)</link>", it, re.S)
+            d = re.search(r"<description>(.*?)</description>", it, re.S)
+            if t and l:
+                out.append((_text(t.group(1)), html.unescape(l.group(1)).strip(),
+                            _text(d.group(1)) if d else ""))
+        return out
+
+    def ddg(q):
+        h = _get("https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(q))
+        snips = re.findall(r"class=['\"]result-snippet['\"]>(.*?)</td>", h, re.S)
+        hits = re.findall(r'href="(//duckduckgo\.com/l/\?uddg=[^"]+)"', h)
+        return [("", urllib.parse.unquote(x.split("uddg=")[1].split("&")[0]),
+                 _text(snips[i]) if i < len(snips) else "") for i, x in enumerate(hits)]
+
+    def wiki(q):
+        j = json.loads(_get("https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=%s"
+                            "&format=json" % urllib.parse.quote(q)))
+        return [(s["title"], "https://en.wikipedia.org/wiki/" + urllib.parse.quote(s["title"].replace(" ", "_")),
+                 _text(s.get("snippet", ""))) for s in j.get("query", {}).get("search", [])]
+
+    n = max(1, min(int(n or 5), 10))
+    tried = []
+    for name, fn in (("searxng", _searxng), ("bing", bing), ("duckduckgo", ddg), ("wikipedia", wiki)):
+        try:
+            hits = fn(query)[:n]
+            tried.append(name)
+        except Exception as e:
+            tried.append("%s(%s)" % (name, type(e).__name__))
+            continue
+        if hits:
+            return "[%s] %d results for %r:\n%s" % (name, len(hits), query, "\n".join(
+                "%d. %s\n   %s%s" % (i + 1, h[0] or h[1], h[1], ("\n   " + h[2][:220]) if h[2] else "")
+                for i, h in enumerate(hits)))
+    return "no results for %r (tried %s)" % (query, ", ".join(tried))
+
+
+def fetch_url(url, max_chars=6000):
+    """Fetch a URL as text.  A blocked or JS-only page falls back to the Wayback copy, and the
+    result says which one it is (the blocked-page-recovery ladder: never pass a snapshot off as
+    the live page)."""
+    if not re.match(r"^https?://", url or ""):
+        url = "https://" + str(url or "")
+    try:
+        live = _text(_get(url))
+        if len(live) < 200:
+            raise ValueError("only %d chars of text (JS-only page or a block interstitial)" % len(live))
+        return "live fetch of %s (%d chars of text, %d shown)\n\n%s" % (
+            url, len(live), min(len(live), max_chars), live[:max_chars])
+    except Exception as e:
+        try:
+            j = json.loads(_get("https://archive.org/wayback/available?url=" + urllib.parse.quote(url, "")))
+            c = (j.get("archived_snapshots") or {}).get("closest") or {}
+        except Exception:
+            c = {}
+        if c.get("url"):
+            snap = _text(_get(c["url"]))
+            return ("live fetch failed (%s).  ARCHIVED COPY (as archived %s) -- a snapshot, not the "
+                    "live page:\n%s\n\n%s" % (e, c.get("timestamp"), c["url"], snap[:max_chars]))
+        return "could not fetch %s: %s (no Wayback copy either)" % (url, e)
+
+
 def call_tool(name, args, root, auto_yes):
     """Execute one tool call and return its result as a string (never raises)."""
     try:
+        if name == "web_search":
+            return web_search(str(args.get("query", "")), args.get("n") or 5)
+        if name == "fetch_url":
+            return fetch_url(str(args.get("url", "")), args.get("max_chars") or 6000)
         if name == "get_weather":
             return WEATHER.get(str(args.get("city", "")).strip().lower(), "no data for that city")
         p = _under(root, args.get("path"))
