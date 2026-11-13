@@ -1,7 +1,8 @@
 HANDOFF — GTX 1080 Ti (GP102) bring-up over TinyGPU on a MacBook Air M1
 
-Written at the end of session 15 (2026-11-13) and amended by session 16 the same day (the block
-"WHAT SESSION 16 SETTLED" below, tasks B and C, and the handover state) for whoever picks this up
+Written at the end of session 15 (2026-11-13), amended by session 16 the same day (the block
+"WHAT SESSION 16 SETTLED" below, tasks B and C, and the handover state) and again by session 17
+("WHAT SESSION 17 SETTLED" and the Hermes route) for whoever picks this up
 next — human or model.  Every
 claim here is measured on this card unless it says otherwise: the project's standing rule is that a
 claim is a round trip with a negative control, and that the raw value the judgement came from gets
@@ -44,6 +45,30 @@ WHAT SESSION 16 SETTLED (RESULTS.md section 16):
   * `local-gpu serve` refuses to start without the eGPU in the IO registry, starts Docker itself,
     and leaves a watcher that stops everything if the card disconnects. Tested by simulation
     (PASCAL_SIMULATE_DISCONNECT_FILE), NOT with a real unplug.
+
+WHAT SESSION 17 SETTLED (RESULTS.md section 17): the card as a Hermes *agent*, not just a model
+that answers.
+
+  * A seven-turn conversation on one resumed session (8 tool calls) came out correct on every
+    turn -- including exact cross-turn recall of a command string and of a file it had written
+    -- in 286 s, ~41 s per turn, slowest turn 146 s.
+  * A real `delegate_task` child pinned to the card (`delegation.base_url` + `api_key` + `model`
+    + `api_mode`) did a 3/3-correct file-reading task in 103.6 s, and the server log shows the
+    work (10,915-token prompt at 592 tok/s prefill, 11.6 tok/s decode). The pin was reverted --
+    it routes every child.
+  * The fixed prompt is 13.8K tokens and ~10.4K of it is JSON tool schemas, so `bin/hermes-local`
+    launches with a four-tool surface instead: 6.9K tokens, 10.6 s to the first token instead of
+    24.6 s.
+  * Two levers were tried and measured as nothing, so do not re-open them: temperature (the chat
+    harness's "lower is shorter" does NOT hold on the Hermes route -- 1.0/0.2/0.0 medians
+    619/954/1387 tokens for one identical prompt, run-to-run spread 427-1509) and `max_tokens`
+    (a 900 cap made Hermes continue the answer in a second request rather than shorten it).
+  * One free win is taken in `~/.hermes/config.yaml`:
+    `auxiliary.title_generation.model_upgrade_enabled: false` -- verified 3 -> 1 requests per
+    one-shot.
+  * In one-shot `-q` mode `execute_code` and `-c`-flagged shell commands are refused for lack of
+    an approver; the model routes around them and still answers, but interactive is the honest
+    shape for real work.
 
 WHAT SESSION 15 SETTLED — three levers, each closed by measurement so nobody re-opens them on
 intuition:
@@ -319,6 +344,8 @@ F. **Left unclaimed on purpose:** the v01_07 QMD layout as a serialization encod
   sandbox/               README.md (backends, mounts, deps, seeding), tools/candles.py
   maxpatch/              patches/<modular-version>/ + install.sh (+ --revert), kernels/w8, patch_target.py
   kernels/               PTX sources + sm_61 cubins + the ptxas Docker build
+  bin/                   local-gpu (the driver of everything), gpu-chat, gpu-chat-tools, and
+                         hermes-local (the Hermes launch with the lean tool surface, section 17)
   probes/freeze_card_test.py   proves the token stream is gated by the driver server
   logs/                  bench/ (benchmark reports), mclk/ (reclock evidence), smclk/ (the sweep log)
   docs/                  evidence-log.md, reference/ (+ files/ with the vendored nvgpu sources to
@@ -327,7 +354,13 @@ F. **Left unclaimed on purpose:** the v01_07 QMD layout as a serialization encod
 =====================================================================
 7. HANDOVER STATE
 =====================================================================
-Session 16 left the card warm, serving gemma4-e4b on llama.cpp with vision (context 65536, 2.9 GiB
+Session 17 left everything exactly where session 16 did -- the card warm, serving gemma4-e4b on
+llama.cpp with vision (context 65536, 2.8 GiB of VRAM free, up 2h23m at the end of the session),
+1080 MHz memory / 607 MHz SM, endpoint 127.0.0.1:11434 up -- and touched no card state at all: the
+work was Hermes-side, and every experiment (temperature, `max_tokens`, the delegation pin) was
+reverted.  The one live change outside this repo is `auxiliary.title_generation.
+model_upgrade_enabled: false` in `~/.hermes/config.yaml`.  Session 16 left the card warm, serving
+gemma4-e4b on llama.cpp with vision (context 65536, 2.9 GiB
 of VRAM free), 1080 MHz memory / 607 MHz SM, endpoint 127.0.0.1:11434 up, shimd and `local-gpu
 watch` running; maxnightly and maxlab stopped.  The session-15 state, for the record:
 Card: warm, serving gemma4-e4b on llama.cpp (context 16384), 1080 MHz memory / 607 MHz SM, endpoint

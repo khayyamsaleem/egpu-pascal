@@ -835,3 +835,104 @@ already in flight when the cable is pulled is outside what a one-second poll can
 
 Spin-up, measured: 41 s from "Docker quit, driver stopped, card warm" to a healthy endpoint; the
 model load is 31 s of that. A cold card adds the devinit + fb + reclock + gr path.
+
+---
+
+## 17. Session 17: the card as a Hermes agent -- what a multi-turn test showed, and the two levers that measured (2026-11-13)
+
+Hermes has been able to answer on the card since session 16; this section is about whether it can
+*work* there, and what a launch should look like. Method: the judge is always the card's own
+server log (`slot print_timing` in `/tmp/llama-server.log` inside the `llamacpp` container), never
+Hermes' reported `tokens.input` -- that field is a running session total and reads about double
+the request. Hermes itself was driven with `--format stream-json` and `--resume <session-id>`,
+so each turn of a multi-turn run leaves a JSONL trail with its own tool calls and timings.
+
+### The fixed prompt is 14K tokens, and ~10.4K of it is tool schemas
+
+A default request carries a 13,413-char system prompt and 37,453 chars of JSON schema for 20 tools.
+Measured on the card by launching with different `-t` sets (each one a fresh tool set, so a real
+full prefill):
+
+| launch | tools | prompt tokens | prefill |
+|---|---|---|---|
+| default | 20 | 13,841 | 24.6 s (562 tok/s) |
+| `-t file,terminal,code_execution,web` | 11 | 6,868 | 10.6 s (646 tok/s) |
+| `-t debugging` | 10 | 6,146 | -- |
+| `-t file,terminal,skills` | 8 | 8,316 | -- |
+| `-t file,terminal` | 8 | 5,701 | -- |
+| `--safe-mode` | 8 | 4,060 | -- |
+
+The heaviest single schemas are `manage_connections` (1.1K tokens), `skill_manage` (0.93K),
+`delegate_task` (0.87K), `browser_exec` (0.85K). There is no per-model toolset in Hermes config
+(`platform_toolsets` is per surface), so this is a launch flag -- hence `bin/hermes-local`, which
+checks the endpoint and then runs `hermes chat -m local -t file,terminal,code_execution,web`.
+Measured end to end through that wrapper: 6,868-token prompt,
+10.6 s of prompt processing, 17 s wall for a one-word answer. **Half the fixed cost, for one flag.**
+
+The same table can be produced without the GPU at all: point Hermes at a mock OpenAI endpoint and
+read the POST body (script in the `gpu-falcon-re` skill, `scripts/measure_prompt_composition.py`).
+
+### Multi-turn: it works, and the cost is latency, not competence
+
+Seven turns on `gemma4-e4b`, one resumed session, 8 tool calls, every turn checked against ground
+truth:
+
+| # | task | wall | result |
+|---|---|---|---|
+| 1 | `uname -a` via the terminal tool, quote the kernel string | 48.0 s | exact |
+| 2 | write *that* string to `kernel.txt` (cross-turn memory) | 16.6 s | correct file, correct bytes |
+| 3 | read it back and quote it | 13.7 s | verbatim |
+| 4 | run python to print sum(1..100) | 36.3 s | 5050 -- via neither tool it tried (see below) |
+| 5 | "what was the first shell command I asked for?" | 5.7 s | `uname -a` |
+| 6 | which handoff file has the most lines? | 145.8 s | `HANDOFF-TO-OPUS.md`, 361 |
+| 7 | summarize the session in three bullets | 19.9 s | right content, bullets ran together |
+
+286 s total, ~41 s per turn. The model chooses sensible tools, holds state across turns, and
+recovers when one fails: turn 4 tried `execute_code`, was refused, tried `python3 -c`, was
+refused, and answered correctly anyway; turn 6 went `search_files` -> refused `execute_code` ->
+`find | xargs wc -l`. Both refusals are a property of one-shot mode, not of the model -- with
+`-q` there is nobody to approve `execute_code` or a `-c`-flagged shell command, so each costs a
+wasted turn. Interactively (the PTY session run first) the same work runs with approvals and no
+refusals. The slowest turn was 146 s, so the default 1800 s request budget needs no tuning.
+
+Turn economics, from the server log: prompt-cache reuse is real (slot chosen by LCP similarity
+0.98-0.998), so after the first turn only 5-200 new tokens are prefilled (60-340 tok/s) and the
+turn is decode-bound at 11.5-11.9 tok/s plain, up to ~19.8 tok/s when n-gram speculation drafts
+(acceptance 0.33-0.83, mean accepted run 22-54 tokens).
+
+### As a subagent
+
+A real `delegate_task` child, with the delegation route pinned at the card
+(`delegation.base_url` + `api_key` + `model` + `api_mode` -- the provider names the example config
+lists are not the only route): it read a 127-line handoff and returned line count, first heading
+and an open task, **3/3 correct**, in 103.6 s over 2 API calls. On-card execution is not taken on
+trust: the log shows a 10,915-token prompt prefilled in 18.4 s (592 tok/s) then 288 tokens at
+11.9 tok/s, a 3,088-token follow-up at 433 tok/s, 610 tokens at 11.6 tok/s. Children get a ~10.9K
+prompt of their own. The pin was reverted afterwards: it routes *every* child, and children carry
+the bulk of a session's tokens.
+
+### Two levers that measured as nothing (do not re-try these)
+
+* **Temperature.** Hermes sends none, so llama-server's 1.0 / top_k 64 / top_p 0.95 applies. The
+  chat harness's finding (0.0 burns ~139 tokens where 1.0 burns ~270 for the same answer,
+  `localgpu/chat.py`) does **not** transfer to the Hermes route. Same prompt, same toolset,
+  generated tokens on the answer turn: 1.0 -> 619 (73 s) / 427 (58 s) / 810 (88 s); 0.2 -> 796
+  (83 s) / 1509 (147 s) / 954 (116 s); 0.0 -> 1387 (138 s). Run-to-run variance of 427-1509 tokens
+  for one identical prompt swamps any sampling effect. Left at the default.
+* **`max_tokens` as a latency guard.** A 900-token cap did not shorten the turn: Hermes saw the
+  truncation and continued the answer in a *second* request (900 tokens, then a 664-token prompt
+  for 334 more), 128 s, same total. Reverted.
+
+### One lever that is free, and taken
+
+Hermes fires a second call per session to name it (`json_schema` response format,
+`reasoning_effort: none`, ~275-token prompt, ~20 tokens out). `auxiliary.title_generation.
+model_upgrade_enabled: false` keeps the instant derived title and drops that round trip --
+verified by counting requests for a one-shot: 3 -> 1. On a 12 tok/s card that is a free second or
+three per session.
+
+**Verdict.** Viable as a primary agent for tool-using work on this project, at ~41 s per turn and
+~11.5 tok/s; viable as a subagent via an explicit delegation pin, at the same rate. Use
+`bin/hermes-local` rather than bare `hermes chat -m local` -- it is the same thing with half the
+prompt -- and prefer an interactive session over `-q` when the work needs `execute_code` or
+`python3 -c`.

@@ -199,6 +199,13 @@ Then `local-gpu serve` and `hermes chat -m local`, `/model local` in a running s
 the default for this model. Its ~14K-token system prompt costs ~35 s of prefill on the first turn
 after a server start; later turns reuse the cache.
 
+Use **`bin/hermes-local`** rather than bare `hermes chat -m local`: it checks the endpoint and then
+launches the same session with a four-tool surface (`file,terminal,code_execution,web`), which is
+6.9K tokens of prompt instead of 13.8K — 10.6 s of prompt processing instead of 24.6 s, because ~10.4K
+of that default prompt is JSON tool schemas. `HERMES_LOCAL_TOOLSETS=file,terminal` cuts it further.
+Section 17 of [RESULTS.md](RESULTS.md) has the multi-turn and subagent measurements behind that
+advice, plus the two levers (temperature, `max_tokens`) that were tried and measured as nothing.
+
 **The card has to be there.** `local-gpu serve` refuses to start when no NVIDIA PCI device is in
 the IO registry, and a watcher it leaves running stops the servers and the driver server if the
 enclosure is unplugged or powered off (MMIO to a card that has gone is a kernel panic). After a

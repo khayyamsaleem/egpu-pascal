@@ -1,0 +1,28 @@
+#!/bin/sh
+# hermes-local -- run Hermes Agent against the GTX 1080 Ti over TinyGPU (provider "local-gpu",
+# alias "-m local").  Same as `hermes chat -m local`, with two differences that were measured
+# (RESULTS.md section 17):
+#
+#   * a narrow tool surface.  With the full CLI toolset the card's fixed prompt is ~13.8K tokens
+#     (~10.4K of it JSON tool schemas for 20 tools) and prefill runs at ~560 tok/s, so the first
+#     token of a cold session costs ~25s.  The four tools an agent needs for work on this project
+#     measure 6.9K tokens / ~10.6s.  Override with HERMES_LOCAL_TOOLSETS.
+#   * nothing else: temperature and max_tokens were both tried and reverted -- on this route
+#     neither shortens a turn (section 17).  The remaining lever is a free one the config already
+#     carries (`auxiliary.title_generation.model_upgrade_enabled: false`).
+#
+# Usage:  hermes-local                      interactive session on the card
+#         hermes-local -q "read X and summarize"    one-shot
+#         HERMES_LOCAL_TOOLSETS=file,terminal hermes-local     even leaner
+set -e
+
+LEAN=${HERMES_LOCAL_TOOLSETS:-file,terminal,code_execution,web}
+ENDPOINT=${LOCAL_GPU_ENDPOINT:-http://127.0.0.1:11434/v1}
+
+if ! curl -sf -m 3 "$ENDPOINT/models" >/dev/null 2>&1; then
+  echo "hermes-local: the card endpoint at $ENDPOINT is not answering." >&2
+  echo "              start it with:  bin/local-gpu serve      (needs the eGPU attached)" >&2
+  exit 1
+fi
+
+exec hermes chat -m local -t "$LEAN" "$@"
