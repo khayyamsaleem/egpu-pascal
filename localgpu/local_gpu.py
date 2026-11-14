@@ -15,6 +15,14 @@
   local-gpu sandbox --build         build the code-sandbox image (the chat's python/shell tools)
   local-gpu status | models | pull M | logs [server|shimd|proxy] | bench [M] | stop [--all]
 
+  local-gpu auto                    keep the endpoint up while the eGPU is attached: bring the whole
+                                    stack up when the enclosure appears, release the card when it
+                                    goes.  This is the macOS stand-in for a udev rule -- it is
+                                    started at login by
+                                    ~/Library/LaunchAgents/com.khayyamsaleem.local-gpu.autostart.plist
+                                    and runs `serve` itself, so `local-gpu stop` parks it (no
+                                    restart fight) until the enclosure is next re-plugged
+
 What `serve` does, skipping whatever is already up:
   1. the card: devinit + fb if cold; the memory reclocked to --mclk (default 1080 MHz, boot is
      405; pascal/mclk.py) and proven with a 9 GiB VRAM pattern test, stepping down to 810 and
@@ -47,6 +55,9 @@ LLAMA_CT, LLAMA_IMAGE, MAX_CT = "llamacpp", "egpu-llamacpp:12.8", "maxnightly"
 LLAMA_PORT, MAX_PORT, PROXY_PORT, SHIMD_PORT = 8080, 8000, 11434, 7461
 SHIM_ENV = "LD_LIBRARY_PATH=/repo/shim/build-cuda12 SHIM_MODE=remote SHIM_QUIET=1"
 HF = "https://huggingface.co/%s/resolve/main/%s"
+STOP_MARKER = "user-stop"        # written by `stop`, cleared by `serve`: the `auto` supervisor stands down
+AUTO_INTERVAL = 2.0              # how often `auto` asks the IO registry (~20 ms an ask, no MMIO)
+AUTO_FAIL_BACKOFF = 60.0         # wait between two failed serve attempts
 
 MODELS = {
     # The primary local model since session 17: faster than E4B on the same card (section 18) and the
@@ -426,6 +437,10 @@ def serve(a):
             print_endpoints(name, m, cur)
         return cur
     runtime = m.get("runtime", "llama")
+    try:                                   # a serve, whoever asked for it, is the user asking for it back
+        os.remove(state_file(STOP_MARKER))
+    except OSError:
+        pass
     require_egpu()                         # before Docker, the containers or a download: no card, no start
     ensure_llama_container() if runtime == "llama" else ensure_max_container()
     ensure_model(name, m)
@@ -472,7 +487,8 @@ def serve(a):
         time.sleep(0.1)
     cur = dict(model=name, runtime=runtime, ctx=ctx, backend=backend, started=time.time())
     json.dump(cur, open(state_file("current.json"), "w"))
-    spawn("watch", [sys.executable, os.path.abspath(__file__), "watch"])
+    if os.environ.get("LOCAL_GPU_SUPERVISED") != "1":    # `auto` does both halves of this itself
+        spawn("watch", [sys.executable, os.path.abspath(__file__), "watch"])
     if not a.quiet:
         print_endpoints(name, m, cur)
     return cur
@@ -527,10 +543,28 @@ def cmd_pull(a):
     ensure_llama_container(); ensure_model(name, m); say("%s ready" % name)
 
 
+def release_card():
+    """Let go of the card without touching it: SIGKILL the driver server (SIGKILL so there is no cleanup
+    path that could issue MMIO) and stop the servers behind the proxy. No marker, no record -- that is
+    `drop_card`."""
+    pid = pid_alive("shimd")
+    if pid:
+        os.kill(pid, signal.SIGKILL)
+    sh(["pkill", "-9", "-f", "pascal/shimd.py"], check=False)
+    stop_servers(watch=False)
+
+
+def drop_card():
+    """Everything that has to happen the moment the eGPU goes: release the card, and record why."""
+    release_card()
+    open(state_file("disconnected"), "w").write(time.strftime("%F %T") + "\n")
+
+
 def cmd_watch(a):
     """Started by `serve`, one per running server: stop everything, without touching the card, as soon as
     the eGPU leaves the IO registry. shimd's own guard (pascal/sleepguard.py) refuses MMIO from the same
-    signal; this is the half that also takes down the servers that would keep asking it."""
+    signal; this is the half that also takes down the servers that would keep asking it. One-shot: the
+    `auto` supervisor is the version that also starts things again."""
     while True:
         time.sleep(2)
         if egpu_present() or egpu_present():                 # asked first: shimd_info() reaches the card
@@ -539,17 +573,103 @@ def cmd_watch(a):
             continue
         say("%s the eGPU disconnected: stopping the servers and the driver server (no card access)"
             % time.strftime("%F %T"))
-        pid = pid_alive("shimd")
-        if pid:
-            os.kill(pid, signal.SIGKILL)                     # SIGKILL: no cleanup path, so no MMIO
-        sh(["pkill", "-9", "-f", "pascal/shimd.py"], check=False)
-        stop_servers(watch=False)
-        open(state_file("disconnected"), "w").write(time.strftime("%F %T") + "\n")
+        drop_card()
         say("stopped. Reconnect the enclosure and run `local-gpu serve`: the card will be cold.")
         return
 
 
+def serving():
+    """Is a *working* server behind the proxy? Three answers: the state file, the proxy's own HTTP reply,
+    and the backend's health. The third one is not optional -- the proxy keeps replying 200 on `/` with a
+    dead backend behind it (measured: llama-server crashes, `/v1` answers "backend unavailable: Remote end
+    closed connection", `/` still 200), so the proxy alone would say "up" forever and the supervisor would
+    never rebuild. None of this touches the card, so it is safe to ask when the enclosure may have gone."""
+    cur = current()
+    if not cur or not http_ok("http://127.0.0.1:%d/" % PROXY_PORT):
+        return False
+    return http_ok(cur["backend"] + ("/health" if cur["runtime"] == "llama" else "/v1/models"), timeout=5)
+
+
+def stop_since(t):
+    """Did a `local-gpu stop` land after t? A marker that is older than that is not this serve's business
+    (serve() clears the marker when it starts, so anything present here was written while it ran)."""
+    try:
+        return os.path.getmtime(state_file(STOP_MARKER)) >= t
+    except OSError:
+        return False
+
+
+def _on_term(*_):
+    """launchd stops a job as a process *group*: on bootout it SIGTERMs the supervisor and then SIGKILLs
+    everything the job left behind. A shimd killed out from under a live RPC socket dies mid-call and
+    keeps the TinyGPU perspective lock (nv_usb4.lock) held, which wedges the *next* card access -- so
+    terminate the driver server ourselves, first, while we still can."""
+    say("asked to stop: releasing the card and the servers")
+    release_card()
+    sys.exit(0)
+
+
+def cmd_auto(a):
+    """The supervisor behind the LaunchAgent (com.khayyamsaleem.local-gpu.autostart): `serve` when the
+    eGPU is attached, `drop_card` when it goes. The IO registry is what is watched (pascal/sleepguard.py,
+    ~20 ms, no MMIO), so nothing here reaches the card before serve() has it.
+
+    It also re-serves after a sleep or a crashed runtime: shimd dies on the wake and llama-server dies
+    with it, and `serving()` is what notices -- the plug-in edge alone would not.
+
+    `local-gpu stop` writes a marker and this stands down until the next attach edge, so stopping by hand
+    is not a fight with a restart loop.
+    """
+    os.environ["LOCAL_GPU_SUPERVISED"] = "1"
+    a.quiet = True
+    signal.signal(signal.SIGTERM, _on_term)
+    attached = None
+    say("supervisor: keeping the endpoint up while the eGPU is attached (IO registry every %.0f s)"
+        % AUTO_INTERVAL)
+    while True:
+        if not (egpu_present() or egpu_present()):
+            if attached:
+                say("%s the eGPU is gone: releasing the card and stopping the servers" % time.strftime("%F %T"))
+                drop_card()
+                say("parked. Power the enclosure back on and the stack comes up by itself.")
+            attached = False
+            time.sleep(AUTO_INTERVAL)
+            continue
+        if not attached:
+            if attached is None and os.path.exists(state_file(STOP_MARKER)):
+                say("the card is attached, but a `local-gpu stop` is standing: waiting for a re-plug")
+                attached = True
+                time.sleep(AUTO_INTERVAL)
+                continue
+            if attached is False:        # a real re-plug is what re-arms a stack stopped by hand
+                try:
+                    os.remove(state_file(STOP_MARKER))
+                except OSError:
+                    pass
+            say("%s the eGPU is attached: bringing the stack up (put it down with `local-gpu stop`)"
+                % time.strftime("%F %T"))
+        attached = True
+        if not serving() and not os.path.exists(state_file(STOP_MARKER)):
+            release_card()          # a half-dead stack (proxy up, backend or driver server gone) would
+                                    # otherwise make serve() fail on the leftover lock/socket
+            started = time.time()
+            try:
+                serve(a)
+            except SystemExit:                               # serve() already said why
+                say("serve gave up; trying again in %.0f s" % AUTO_FAIL_BACKOFF)
+                time.sleep(AUTO_FAIL_BACKOFF)
+                continue
+            if stop_since(started):                          # a `stop` that landed mid-build wins over it
+                say("a `local-gpu stop` arrived while the stack was coming up: releasing it again")
+                release_card()
+        time.sleep(AUTO_INTERVAL)
+
+
 def cmd_stop(a):
+    # The marker goes down *first*: `stop_servers()` takes seconds (it waits for llama-server to die), and
+    # a supervisor that polls in that window would see "no endpoint, no marker" and start a fresh serve
+    # behind the user's back -- which then clears the marker and rebuilds the stack.
+    open(state_file(STOP_MARKER), "w").write(time.strftime("%F %T") + "\n")
     stop_servers(); say("server stopped")
     if a.all:
         kill("shimd")
@@ -655,7 +775,9 @@ def main():
     p = sub.add_parser("pull"); p.add_argument("model")
     p = sub.add_parser("stop"); p.add_argument("--all", action="store_true", help="also stop the driver server")
     sub.add_parser("watch", help="(started by serve) stop everything if the eGPU disconnects")
-    p = sub.add_parser("logs"); p.add_argument("which", nargs="?", default="server", choices=["server", "shimd", "proxy"])
+    common(sub.add_parser("auto", help="supervisor: serve while the eGPU is attached (the LoginItem runs this)"))
+    p = sub.add_parser("logs"); p.add_argument("which", nargs="?", default="server",
+                                               choices=["server", "shimd", "proxy", "auto", "watch"])
     p.add_argument("-n", type=int, default=60)
     p = common(sub.add_parser("bench", help="llama-bench a model"), model=False)
     p.add_argument("model", nargs="?", default=DEFAULT)
@@ -670,7 +792,7 @@ def main():
         cmd_chat(a, prompt=" ".join(a.prompt) or None)
     else:
         {"status": cmd_status, "models": cmd_models, "pull": cmd_pull, "stop": cmd_stop, "watch": cmd_watch, "logs": cmd_logs,
-         "bench": cmd_bench, "sandbox": cmd_sandbox}[a.cmd](a)
+         "bench": cmd_bench, "sandbox": cmd_sandbox, "auto": cmd_auto}[a.cmd](a)
 
 
 if __name__ == "__main__":

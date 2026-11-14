@@ -240,6 +240,34 @@ enclosure is unplugged or powered off (MMIO to a card that has gone is a kernel 
 reconnect, `local-gpu serve` again: the card is cold and is re-initialised. Docker is started for
 you if it is not running. From everything-down to a healthy endpoint is about 40 s.
 
+**Or let it do that part too — the udev rule.** `local-gpu auto` is the supervisor that pairs both
+halves up: it serves when the enclosure appears and releases the card when it goes, so plugging the
+GPU in is all it takes. launchd has no device-attach trigger, so the job stays resident and asks the
+IO registry every 2 s (~20 ms a look, no MMIO) — the same signal `watch` uses, but it restarts
+instead of only stopping, and it also picks the endpoint back up after a sleep (shimd dies on the
+wake). The plist is
+[`localgpu/com.khayyamsaleem.local-gpu.autostart.plist`](localgpu/com.khayyamsaleem.local-gpu.autostart.plist),
+installed as a LoginAgent:
+
+```
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.khayyamsaleem.local-gpu.autostart.plist
+launchctl print    gui/$(id -u)/com.khayyamsaleem.local-gpu.autostart
+```
+
+`RunAtLoad` starts it at login and `KeepAlive` keeps it resident, so a reboot needs nothing. It logs
+to `~/.local/state/local-gpu/auto.log` (`local-gpu logs auto`); the `serve` it runs logs as usual.
+`local-gpu stop` writes a marker the supervisor honours — stopping by hand is not a restart fight,
+and the next re-plug re-arms it. Uninstall with
+`launchctl bootout gui/$(id -u)/com.khayyamsaleem.local-gpu.autostart`.
+
+Two things that bite when reloading the job (`Bootstrap failed: 5: Input/output error` means the
+previous instance is still tearing down — wait a second and run it again; to rehearse a plug/unplug,
+put `PASCAL_SIMULATE_DISCONNECT_FILE=/tmp/egpu-gone-hook` in the job's `EnvironmentVariables` and
+touch that file, which is what `probes/autostart_lifecycle_test.sh` drives end to end). And note that
+launchd stops a job as a *process group*, so the supervisor terminates the driver server itself on
+SIGTERM: a `shimd` killed out from under a live RPC socket crashes and keeps the TinyGPU lock, which
+wedges the next card access.
+
 ## Running code: the sandbox
 
 The model can write and run code without the question "may I run this?" having to be "only if I read

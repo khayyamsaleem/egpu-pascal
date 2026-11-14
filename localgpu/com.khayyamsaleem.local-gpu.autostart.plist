@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The macOS stand-in for a udev rule: launchd has no "device attached" trigger, so this keeps
+     `bin/local-gpu auto` running for the whole login session and that supervisor is what watches the
+     IO registry for the eGPU (~20 ms a look, no MMIO) and brings the stack up on attach and releases
+     the card on detach.
+
+     Install / reload:
+       launchctl bootout   gui/$(id -u)/com.khayyamsaleem.local-gpu.autostart 2>/dev/null
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.khayyamsaleem.local-gpu.autostart.plist
+       launchctl print    gui/$(id -u)/com.khayyamsaleem.local-gpu.autostart | head -20
+
+     A bootstrap that lands while the previous instance is still tearing down answers
+     "Bootstrap failed: 5: Input/output error" -- wait a couple of seconds and run it again.
+
+     To rehearse a plug/unplug without touching the hardware, add
+       <key>PASCAL_SIMULATE_DISCONNECT_FILE</key><string>/tmp/egpu-gone-hook</string>
+     to EnvironmentVariables and touch/rm that file: the supervisor reads it through
+     pascal/sleepguard.py:egpu_present() and can tell the card is gone.
+
+     Log: ~/.local/state/local-gpu/auto.log (`local-gpu logs auto`); the serve it runs appends to
+     shimd.log / proxy.log as usual. Uninstall: `launchctl bootout gui/$(id -u)/com.khayyamsaleem.local-gpu.autostart`.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.khayyamsaleem.local-gpu.autostart</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/khayyamsaleem/dev/egpu-pascal/bin/local-gpu</string>
+		<string>auto</string>
+	</array>
+
+	<!-- launchd hands a job a bare PATH: `docker` is in /usr/local/bin (OrbStack) and python3 is the
+	     Homebrew one in an interactive shell, so name both ends. HOME is needed by docker and by the
+	     state dir under ~/.local/state/local-gpu. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/khayyamsaleem</string>
+	</dict>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/khayyamsaleem/dev/egpu-pascal</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<!-- if the supervisor ever dies, do not respawn it in a tight loop -->
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+
+	<key>StandardOutPath</key>
+	<string>/Users/khayyamsaleem/.local/state/local-gpu/auto.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/khayyamsaleem/.local/state/local-gpu/auto.log</string>
+</dict>
+</plist>
